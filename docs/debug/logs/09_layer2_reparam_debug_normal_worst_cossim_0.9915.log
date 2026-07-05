@@ -1,0 +1,32 @@
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, u, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 2 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [c2, delta_n, a2, q_knots, h_r_knots, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 411 seconds.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+worst indices: [81 82 80 83 79 84 78 85 77 86]
+worst cos_sim: [0.99152398 0.99152439 0.99152441 0.99152561 0.99152565 0.99152765
+ 0.9915277  0.99153052 0.99153057 0.99153421]
+worst times: [1.12 1.13 1.11 1.14 1.1  1.15 1.09 1.16 1.08 1.17]
+tau_mean: [0.30299512 1.2955781  2.28843004 3.29053456 4.29527189 5.26943697
+ 6.05045978]
+normal at worst idx: [[ 0.007393    0.38342701 -0.92354159]
+ [ 0.00845745  0.3834862  -0.92350788]
+ [ 0.00633482  0.38338153 -0.92356834]
+ [ 0.00952826  0.38355926 -0.92346711]
+ [ 0.00528282  0.38334957 -0.92358822]
+ [ 0.0106055   0.38364636 -0.92341919]
+ [ 0.00423693  0.38333099 -0.92360132]
+ [ 0.01168926  0.38374767 -0.92336401]
+ [ 0.00319705  0.38332559 -0.92360775]
+ [ 0.01277963  0.38386336 -0.92330147]]
+normal_angular_sd at worst idx: [0.05037894 0.05041443 0.05034082 0.05044742 0.05029991 0.05047797
+ 0.05025601 0.05050611 0.05020899 0.05053187]

@@ -12,14 +12,29 @@ which already has the two spec docs; NOT based on `main`, which lacks them).
 Environment notes (see "Environment" section below) — **use the miniforge
 python for everything**, not the `python` on PATH.
 
-## Status as of last update (2026-07-05)
+## Status as of last update (2026-07-06)
 
-**Reparameterization implemented; Layer 2 test run in progress.**
-The full reparameterization described in `docs/bayesian_two_layer_spec.md`
-and `docs/claude_layer2_reparameterization_prompt.md` has been applied to
-`phase_coordinates/bayesian.py`. All non-MCMC tests pass. The Layer 2 MCMC
-test (`docs/debug/scripts/test_layer2.py`) is running in background —
-results will be added here when it completes.
+**Reparameterization complete; primary artifact resolved; amplitude convergence
+issue remains under investigation.**
+
+The full reparameterization has been applied to `phase_coordinates/bayesian.py`
+and the Layer 2 MCMC test (`docs/debug/scripts/test_layer2.py`) has completed.
+Key results (draws=400, tune=400, chains=2, target_accept=0.9, random_seed=0):
+
+- **Divergences: 0** (was 84 — primary issue FIXED)
+- **Normal artifact: GONE** (min cos_sim 0.9915, median 0.9978 — was 0.51)
+- **Phase monotone by construction** (satisfies boundary by construction)
+- **All assertions passed** (normal, phase, radius > 0, radius median 0.71 > 0.7, perp dev < 0.1)
+- Runtime: 418s (vs 999s worst case, 423s best prior case)
+- Chain 1 hit max_treedepth; rhat > 1.01 for some parameters; ESS < 100 for some params
+
+**Remaining concern — amplitude parameter convergence:**
+The radius posterior median is 0.709 (expected ~1.0 for this synthetic data) and
+sigma_x_mean is 0.467 (expected ~0.02 given noise scale 0.02 and R_X ≈ 1.0).
+These suggest the amplitude/radius/noise parameters haven't converged well despite
+the phase issue being fixed. This is consistent with Chain 1 hitting max_treedepth
+and ESS < 100 for some parameters. Next step: run with tune=1000 to give the mass
+matrix more time to adapt to the amplitude subspace.
 
 **Environment**: a new pixi environment is now set up for this project
 (`pixi.toml` at the repo root). Use `pixi run python <script>` or
@@ -64,21 +79,12 @@ The pixi env has PyMC 6.0.1, ArviZ 1.2.0, numba 0.65.1.
   with non-uniform speed, invariant to constant offset in q within a cycle — ALL PASS.
 - Frame construction (e1/e2/n): unchanged from previous validated version.
 
-**MCMC test status**: running (see running log). Previous worst-case was 84
-divergences / 999s / min cos_sim 0.51. Expected improvement: 0 divergences,
-min cos_sim > 0.95. Will update this section with actual results.
+**MCMC test results (log 08):** 0 divergences / 418s / min cos_sim 0.9915 /
+ALL LAYER2 CHECKS PASSED. Amplitude parameters still converging (max_treedepth,
+low ESS). See "Layer 2 findings" item 4 below for full detail.
 
-**Handed off for reparameterization debugging (previous note, still relevant
-for context).** All of Layer 1, Layer 2, diagnostics, and the public API
-are implemented in `phase_coordinates/bayesian.py` (~1300 lines). Utility
-functions and Layer 1 are fully validated with passing standalone checks.
-Layer 2 is implemented and structurally correct, but had an unresolved NUTS
-sampling convergence problem (high divergence rate + localized normal artifact).
-See "Layer 2 findings" below for the full diagnosis and history. The
-reparameterization above targets both root causes identified in that analysis.
-
-**All raw diagnostic scripts and run logs behind those findings are committed
-under `docs/debug/` (see `docs/debug/README.md` for an index).**
+**All raw diagnostic scripts and run logs are in `docs/debug/` (see
+`docs/debug/README.md` for an index).**
 
 ## What's done
 
@@ -115,13 +121,15 @@ under `docs/debug/` (see `docs/debug/README.md` for an index).**
 
 ## What's NOT done yet
 
-- [ ] **OPEN ISSUE, being handed off for debugging** — Layer 2 NUTS sampling
-      has an unresolved convergence problem (high divergence rate, localized
-      sign/spline-excursion artifact). See `docs/debug/README.md` for the
-      full evidence, current best hypothesis, and a prioritized list of
-      untried ideas. Everything below this is blocked on resolving it (or on
-      a decision to fall back to one of the other options if reparameterization
-      doesn't pan out — see the numbered options preserved below).
+- [ ] **Amplitude convergence** — radius and sigma_x don't match ground truth
+      (median radius 0.709 vs expected 1.0; sigma_x 0.467 vs expected ~0.02).
+      Reparameterization eliminated divergences (was 84, now 0) and fixed the
+      normal artifact (min cos_sim now 0.9915). Chain 1 still hits max_treedepth
+      and ESS < 100 for some amplitude parameters, suggesting the mass matrix
+      needs more tune steps. Next: run with tune=1000 to confirm.
+      All Layer 2 test assertions pass at current settings (the 0.7 radius floor
+      is barely met), but amplitude accuracy needs improvement before the suite
+      is trustworthy.
 - [ ] pytest test suite (`tests/test_bayesian_phase_coordinates.py`) covering the
       7 required scenarios from the prompt (see "Required tests" below).
 - [ ] Run full suite (existing + new) on both the no-pymc default env and the
@@ -400,13 +408,39 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
      15-20 minutes, which makes this kind of iterative sampler-tuning very
      expensive to do blind).
 
-4. **Runtime concern (independent of the divergence issue)**: even in the
-   "good" run (17 divergences, scientifically correct output), a full Layer 2
-   fit at draws=400/tune=400/chains=2 took ~220-423s; the "bad" run took 999s.
-   For the pytest suite this is likely too slow to run more than once or
-   twice even if the divergence issue is resolved.
+4. **Reparameterization result (2026-07-06, log 08): primary issues resolved.**
+   Applied all 6 changes described in `docs/claude_layer2_reparameterization_prompt.md`:
+   tangent-plane normal deviations, smoothness potential, sigma_a2 floor, resultant-length
+   diagnostic, and boundary-normalized positive phase. Run with draws=400, tune=400,
+   chains=2, target_accept=0.9, random_seed=0.
 
-5. **The model's own posterior-SD uncertainty does NOT flag the bad region.**
+   **Primary issues FIXED:**
+   - Divergences: **0** (was 84 in the worst previous run)
+   - Normal artifact: **gone** (min cos_sim 0.9915, median 0.9978 — was 0.51 / 0.999)
+   - Phase monotone by construction; all test assertions passed.
+   - Runtime: 418s (vs 999s worst, comparable to 423s best prior case).
+
+   **Remaining issue — amplitude convergence:**
+   Chain 1 hit max_treedepth; rhat > 1.01 for some parameters; ESS < 100 for some
+   parameters. Radius posterior median = 0.709 (expected ~1.0), sigma_x_mean = 0.467
+   (expected ~0.02 given noise scale 0.02, R_X ≈ 1.0). These amplitude parameters
+   have not converged yet. The radius barely clears the test's 0.7 floor; the
+   sigma_x value being off by 20x suggests the amplitude model is trading radius
+   against noise in a way the sampler hasn't sorted out yet.
+
+   Likely cause: the mass matrix hasn't had enough tune steps to adapt to the
+   amplitude subspace. Phase is now well-identified (by construction), so the
+   remaining difficulty is between radius/perp-deviation/sigma_x parameters, which
+   tend to be correlated and need a non-diagonal mass matrix approximation to
+   sample efficiently. Next step: tune=1000.
+
+5. **Runtime concern**: a full Layer 2 fit at draws=400/tune=400/chains=2 takes
+   ~418s (fastest successful run). For the pytest suite this is slow — a separate
+   "short" test configuration (fewer cycles, fewer draws) may be needed.
+
+6. **The model's own posterior-SD uncertainty did NOT flag the bad region (pre-fix).**
+
+6. **The model's own posterior-SD uncertainty does NOT flag the bad region.**
    In the artifact window (t=0.58-0.67s in the nutpie run), `normal_angular_sd`
    — the posterior SD of the normal direction, which is exactly the quantity
    the diagnostics module reports to users as an uncertainty estimate — was
@@ -459,10 +493,11 @@ final deliverables write-up's "deviations" section.
    formula only in behavior extremely far from that regime (which the model
    should essentially never visit anyway, by construction of the same prior).
 
-4. **No explicit floor for `sigma_a2` (Layer 2 boundary-direction prior SD)**:
-   spec gives explicit uncertainty floors for `tau`, `c`, `u` in Layer 2's
-   `1.5x`-padding rule but not for `a`. Implemented as plain `1.5 * sd` with no
-   floor, per literal reading (no floor specified = no floor applied).
+4. **`sigma_a2` floor added** — spec gives explicit uncertainty floors for `tau`,
+   `c`, `u` in Layer 2's `1.5x`-padding rule but not for `a`. Originally
+   implemented as plain `1.5 * sd` with no floor; a `0.02 * R_X` floor has since
+   been added (this was the missing deviation flagged in the reparameterization
+   plan — now fixed).
 
 5. **"Changing planes" test data uses a gentler rotation rate (~8 deg/cycle)
    than the existing deterministic estimator's stress-test fixture** (which
