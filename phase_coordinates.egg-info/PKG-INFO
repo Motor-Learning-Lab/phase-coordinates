@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: phase-coordinates
+Version: 0.1.0
+Summary: Cycle-by-cycle PCA phase coordinates for multivariate cyclic motion
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scikit-learn
+Requires-Dist: scipy
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: nbformat; extra == "dev"
+Requires-Dist: jupyter; extra == "dev"
+Requires-Dist: matplotlib; extra == "dev"
+
+# phase-coordinates
