@@ -1,0 +1,17 @@
+WARNING (pytensor.configdefaults): g++ not available, if using conda: `conda install gxx`
+WARNING (pytensor.configdefaults): g++ not detected!  PyTensor will be unable to compile C-implementations and will default to Python. Performance may be severely degraded. To remove this warning, set PyTensor flags cxx to an empty string.
+tau_idx [ 36 134 233 333 435 535 595]
+Layer1 took 42.12448835372925 s
+Layer2 took 221.15335249900818 s
+normal cos_sim stats: min 0.3955113145473317 median 0.9997580771169088
+phase monotonic: True min dphi 0.049020190247009876
+radius stats: min 0.9569983291605859 median 1.0058035817326014 expected ~1.0
+perp deviation median abs: 0.02807865361250028
+e1 norms range: 0.9999999999999998 1.0000000000000002
+e2 norms range: 0.9999999999999997 1.0000000000000002
+e1.n dot max abs: 2.7755575615628914e-16
+e2.n dot max abs: 1.1102230246251565e-16
+e2 vs cross(n,e1) max diff: 3.3306690738754696e-16
+fraction of time near phase 0: 0.02631578947368421 count 15
+sigma_x_mean 0.02009668596706163 R_X 1.0016890022016276
+ALL LAYER2 CHECKS PASSED

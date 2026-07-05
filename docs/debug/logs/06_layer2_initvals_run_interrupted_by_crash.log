@@ -1,0 +1,10 @@
+WARNING (pytensor.configdefaults): g++ not available, if using conda: `conda install gxx`
+WARNING (pytensor.configdefaults): g++ not detected!  PyTensor will be unable to compile C-implementations and will default to Python. Performance may be severely degraded. To remove this warning, set PyTensor flags cxx to an empty string.
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, u, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 26 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [c2, u2, a2, g_knots, phi0, h_r_knots, h_z_knots, rho_x]

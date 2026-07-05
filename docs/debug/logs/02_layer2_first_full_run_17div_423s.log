@@ -1,0 +1,37 @@
+WARNING (pytensor.configdefaults): g++ not available, if using conda: `conda install gxx`
+WARNING (pytensor.configdefaults): g++ not detected!  PyTensor will be unable to compile C-implementations and will default to Python. Performance may be severely degraded. To remove this warning, set PyTensor flags cxx to an empty string.
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, u, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 5 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [c2, u2, a2, g_knots, phi0, h_r_knots, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 423 seconds.
+There were 17 divergences after tuning. Increase `target_accept` or reparameterize.
+Chain 0 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+tau_idx [ 36 134 233 333 435 535 595]
+Layer1 took 7.7747063636779785 s
+Layer2 took 427.02015137672424 s
+normal cos_sim stats: min 0.9974987037449956 median 0.999754515959018
+phase monotonic: True min dphi 0.06108303645667945
+radius stats: min 0.9533307050594725 median 0.9999094542838856 expected ~1.0
+perp deviation median abs: 0.015201909363648132
+e1 norms range: 0.9999999999999998 1.0000000000000002
+e2 norms range: 0.9999999999999998 1.0
+e1.n dot max abs: 0.05855522516328096
+e2.n dot max abs: 0.00886780596858222
+e2 vs cross(n,e1) max diff: 0.028564648963789463
+Traceback (most recent call last):
+  File "D:\tmp\test_layer2.py", line 90, in <module>
+    main()
+  File "D:\tmp\test_layer2.py", line 75, in main
+    assert np.max(np.abs(np.sum(e1 * n, axis=-1))) < 1e-3
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

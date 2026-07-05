@@ -1,0 +1,20 @@
+WARNING (pytensor.configdefaults): g++ not available, if using conda: `conda install gxx`
+WARNING (pytensor.configdefaults): g++ not detected!  PyTensor will be unable to compile C-implementations and will default to Python. Performance may be severely degraded. To remove this warning, set PyTensor flags cxx to an empty string.
+worst indices: [33 32 34 31 35 30 36 29 37 28]
+worst cos_sim: [0.39551131 0.39583025 0.39630235 0.39722124 0.39825513 0.3996585
+ 0.40143737 0.40312685 0.405935   0.4076203 ]
+worst times: [0.63 0.62 0.64 0.61 0.65 0.6  0.66 0.59 0.67 0.58]
+tau_mean: [0.29535956 1.28844831 2.28477033 3.28453816 4.28877791 5.2633324
+ 6.05125207]
+normal at worst idx: [[-0.71256917 -0.69961418  0.05277469]
+ [-0.71119114 -0.70104949  0.05231429]
+ [-0.71354799 -0.69849634  0.05433348]
+ [-0.70943069 -0.70278572  0.05291805]
+ [-0.71410255 -0.69771336  0.05704042]
+ [-0.7072975  -0.70480697  0.05456539]
+ [-0.71419818 -0.69728363  0.06096306]
+ [-0.70479482 -0.70709755  0.05724783]
+ [-0.71378861 -0.69722649  0.06618946]
+ [-0.70192006 -0.70964159  0.06096762]]
+normal_angular_sd at worst idx: [0.06360093 0.06495121 0.06248335 0.06654687 0.06158692 0.06840158
+ 0.0609011  0.07052995 0.06041635 0.07294729]
