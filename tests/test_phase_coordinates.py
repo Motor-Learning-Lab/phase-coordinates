@@ -2,6 +2,8 @@
 Tests for phase_coordinates.core
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -58,6 +60,69 @@ def _make_cyclic_3d(
     return X, phase_true, fs
 
 
+def _rotation_matrix_x(angle):
+    """Rotation matrix around the x-axis by *angle* radians."""
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+
+def _rotation_matrix_z(angle):
+    """Rotation matrix around the z-axis by *angle* radians."""
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+
+def _make_changing_planes(
+    n_cycles=6,
+    samples_per_cycle=120,
+    noise_std=0.01,
+    rng=None,
+):
+    """
+    Generate 3D cyclic data where each cycle lies in a *different* plane.
+
+    The local motion in cycle *k* is a unit circle in the (u, v) plane.
+    The plane is tilted by a different angle for each cycle via a rotation
+    around the z-axis.
+
+    Returns
+    -------
+    X          : ndarray (n_time, 3)
+    phase_true : ndarray (n_time,)  - unwrapped true phase
+    true_normals : list of ndarray (3,) - true plane normal for each cycle
+    """
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    n_time = n_cycles * samples_per_cycle
+    t = np.arange(n_time) / float(samples_per_cycle)
+    phase_true = 2 * np.pi * t
+
+    X = np.zeros((n_time, 3))
+    true_normals = []
+
+    for cyc in range(n_cycles):
+        # Different tilt for every cycle: cycle k tilted by k * 30 degrees
+        tilt = cyc * (np.pi / 6)  # 30 degrees per cycle
+        R = _rotation_matrix_z(tilt)
+
+        # True normal of this cycle's plane (z-axis rotated by R)
+        normal = R @ np.array([0.0, 0.0, 1.0])
+        true_normals.append(normal)
+
+        start = cyc * samples_per_cycle
+        end = start + samples_per_cycle
+        theta = phase_true[start:end] - phase_true[start]
+
+        # Unit circle in local (u, v, 0) then rotate
+        local = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(len(theta))])
+        X[start:end] = (R @ local.T).T
+
+    X += rng.standard_normal(X.shape) * noise_std
+
+    return X, phase_true, true_normals
+
+
 # ---------------------------------------------------------------------------
 # hilbert_phase
 # ---------------------------------------------------------------------------
@@ -103,16 +168,18 @@ class TestHilbertPhase:
     def test_phase_rate_matches_frequency(self):
         """
         For a pure sinusoid at f Hz, the mean rate of phase increase should be
-        approximately 2π·f rad/s.
+        approximately 2pi*f rad/s.
         """
         fs = 500.0
         f = 3.0
         t = np.arange(2000) / fs
         sig = np.sin(2 * np.pi * f * t)
         unwrapped, _, _ = hilbert_phase(sig, fs=fs, f_range=(1.5, 6.0))
-        # Skip edges affected by filter transients
+        # Skip edges affected by filter transients; 0.5 rad/s tolerance is well
+        # within the expected accuracy of the Hilbert phase estimate for a clean
+        # sinusoid after trimming 10% from each end of the 2000-sample signal.
         rate = np.mean(np.diff(unwrapped[200:-200])) * fs  # rad/s
-        assert abs(rate - 2 * np.pi * f) < 0.5, f"Phase rate {rate:.3f} far from 2π·{f}"
+        assert abs(rate - 2 * np.pi * f) < 0.5, f"Phase rate {rate:.3f} far from 2pi*{f}"
 
     def test_amplitude_positive(self):
         fs = 100.0
@@ -127,6 +194,94 @@ class TestHilbertPhase:
         sig = list(np.sin(2 * np.pi * 2 * t))
         unwrapped, wrapped, amp = hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
         assert unwrapped.shape == (200,)
+
+    # -- input validation --
+
+    def test_raises_on_2d_input(self):
+        fs = 100.0
+        sig = np.ones((50, 2))
+        with pytest.raises(ValueError, match="1-D"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
+
+    def test_raises_on_nan_input(self):
+        fs = 100.0
+        sig = np.sin(np.linspace(0, 4 * np.pi, 100))
+        sig[10] = np.nan
+        with pytest.raises(ValueError, match="non-finite"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
+
+    def test_raises_on_inf_input(self):
+        fs = 100.0
+        sig = np.sin(np.linspace(0, 4 * np.pi, 100)).copy()
+        sig[5] = np.inf
+        with pytest.raises(ValueError, match="non-finite"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
+
+    def test_raises_on_signal_too_short(self):
+        fs = 100.0
+        sig = np.ones(5)  # fewer than 13 samples
+        with pytest.raises(ValueError, match="too short"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
+
+    def test_raises_on_non_positive_fs(self):
+        fs = 100.0
+        t = np.arange(200) / fs
+        sig = np.sin(2 * np.pi * 2 * t)
+        with pytest.raises(ValueError, match="positive"):
+            hilbert_phase(sig, fs=0.0, f_range=(1.0, 4.0))
+        with pytest.raises(ValueError, match="positive"):
+            hilbert_phase(sig, fs=-10.0, f_range=(1.0, 4.0))
+
+    def test_raises_on_invalid_f_range_low_ge_high(self):
+        fs = 100.0
+        t = np.arange(200) / fs
+        sig = np.sin(2 * np.pi * 2 * t)
+        with pytest.raises(ValueError, match="low < high"):
+            hilbert_phase(sig, fs=fs, f_range=(5.0, 2.0))
+        with pytest.raises(ValueError, match="low < high"):
+            hilbert_phase(sig, fs=fs, f_range=(3.0, 3.0))
+
+    def test_raises_on_f_range_above_nyquist(self):
+        fs = 100.0
+        t = np.arange(200) / fs
+        sig = np.sin(2 * np.pi * 2 * t)
+        with pytest.raises(ValueError, match="Nyquist"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 50.0))  # high == Nyquist
+        with pytest.raises(ValueError, match="Nyquist"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 60.0))  # high > Nyquist
+
+    def test_raises_on_f_range_wrong_length(self):
+        fs = 100.0
+        t = np.arange(200) / fs
+        sig = np.sin(2 * np.pi * 2 * t)
+        with pytest.raises(ValueError, match="length-2"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0,))
+        with pytest.raises(ValueError, match="length-2"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 2.0, 3.0))
+
+    def test_raises_on_f_range_low_not_positive(self):
+        fs = 100.0
+        t = np.arange(200) / fs
+        sig = np.sin(2 * np.pi * 2 * t)
+        with pytest.raises(ValueError, match="0 < low < high"):
+            hilbert_phase(sig, fs=fs, f_range=(0.0, 10.0))
+
+    # -- non-monotonic phase warning --
+
+    def test_warns_on_non_monotonic_phase(self):
+        """
+        A sum of two close frequencies creates beats (amplitude nulls).
+        At each null the Hilbert phase jumps, producing large negative steps.
+        This should trigger a UserWarning about unreliable phase.
+        """
+        fs = 200.0
+        t = np.arange(2000) / fs
+        # f1 and f2 both inside the bandpass; beat frequency = |f1-f2| = 1 Hz
+        # creates amplitude nulls ~10 times in 10 s, each causing a pi phase jump
+        f1, f2 = 1.5, 2.5
+        sig = np.sin(2 * np.pi * f1 * t) + np.sin(2 * np.pi * f2 * t)
+        with pytest.warns(UserWarning, match="negative steps"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 3.5))
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +437,9 @@ class TestCycleByCyclePcaCoordinates:
 
     def test_data_recovery(self):
         """
-        Reconstruct X from the per-cycle PCA models and verify it matches the
-        original data to within numerical precision.
+        Reconstruct X from the per-cycle PCA models using iloc (positional
+        indexing) and verify it matches the original data to within numerical
+        precision.
         """
         X, phase_true, _ = _make_cyclic_3d(
             n_cycles=5, samples_per_cycle=100, noise_std=0.0
@@ -292,12 +448,12 @@ class TestCycleByCyclePcaCoordinates:
 
         X_rec = np.full_like(X, np.nan)
         for cyc, model in models.items():
-            idx = model["indices"]
+            idx = model["indices"]  # positional integer indices
             center = model["center"]
             comps = model["components"]  # (3, n_features)
-            p1 = coords.loc[idx, "pc1_local"].to_numpy()
-            p2 = coords.loc[idx, "pc2_local"].to_numpy()
-            p3 = coords.loc[idx, "pc3_local"].to_numpy()
+            p1 = coords.iloc[idx]["pc1_local"].to_numpy()
+            p2 = coords.iloc[idx]["pc2_local"].to_numpy()
+            p3 = coords.iloc[idx]["pc3_local"].to_numpy()
             X_rec[idx] = (
                 p1[:, None] * comps[0]
                 + p2[:, None] * comps[1]
@@ -307,6 +463,80 @@ class TestCycleByCyclePcaCoordinates:
 
         valid = ~np.isnan(X_rec).any(axis=1)
         np.testing.assert_allclose(X[valid], X_rec[valid], atol=1e-10)
+
+    def test_data_recovery_non_default_index(self):
+        """
+        Reconstruction via iloc works correctly even when the DataFrame has a
+        non-default (e.g. time-based) index.
+        """
+        X, phase_true, _ = _make_cyclic_3d(
+            n_cycles=5, samples_per_cycle=100, noise_std=0.0
+        )
+        n_time = len(X)
+        # Non-default float time index
+        time_index = pd.Index(np.arange(n_time) / 100.0, name="time_s")
+        df = pd.DataFrame(X, columns=["x", "y", "z"], index=time_index)
+
+        coords, models = cycle_by_cycle_pca_coordinates(df, phase=phase_true)
+
+        # The coords DataFrame inherits the non-default index.
+        assert (coords.index == time_index).all()
+
+        X_rec = np.full_like(X, np.nan)
+        for cyc, model in models.items():
+            idx = model["indices"]  # always positional ints
+            center = model["center"]
+            comps = model["components"]
+            # Must use iloc for positional access, not loc
+            p1 = coords.iloc[idx]["pc1_local"].to_numpy()
+            p2 = coords.iloc[idx]["pc2_local"].to_numpy()
+            p3 = coords.iloc[idx]["pc3_local"].to_numpy()
+            X_rec[idx] = (
+                p1[:, None] * comps[0]
+                + p2[:, None] * comps[1]
+                + p3[:, None] * comps[2]
+                + center
+            )
+
+        valid = ~np.isnan(X_rec).any(axis=1)
+        np.testing.assert_allclose(X[valid], X_rec[valid], atol=1e-10)
+
+    def test_data_recovery_approximate_for_high_dimensional_input(self):
+        """
+        For input with more than 3 features, reconstruction from only 3 PCs is
+        approximate. Verify that the error is non-trivial when the data has
+        significant variance beyond the first 3 components.
+        """
+        rng = np.random.default_rng(99)
+        n_time = 600
+        phase_true = np.linspace(0, 10 * np.pi, n_time)
+        # 5D data where all 5 dimensions carry independent signal
+        X = rng.standard_normal((n_time, 5))
+
+        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+
+        X_rec = np.full_like(X, np.nan)
+        for cyc, model in models.items():
+            idx = model["indices"]
+            center = model["center"]
+            comps = model["components"]  # shape (3, 5)
+            p1 = coords.iloc[idx]["pc1_local"].to_numpy()
+            p2 = coords.iloc[idx]["pc2_local"].to_numpy()
+            p3 = coords.iloc[idx]["pc3_local"].to_numpy()
+            X_rec[idx] = (
+                p1[:, None] * comps[0]
+                + p2[:, None] * comps[1]
+                + p3[:, None] * comps[2]
+                + center
+            )
+
+        valid = ~np.isnan(X_rec).any(axis=1)
+        max_error = np.abs(X[valid] - X_rec[valid]).max()
+        # Reconstruction from 3 of 5 PCs is lossy for isotropic noise data.
+        assert max_error > 1e-6, (
+            f"Expected approximate (lossy) reconstruction for 5D data, "
+            f"but max error was only {max_error:.2e}"
+        )
 
     def test_radius_close_to_true_radius(self):
         """
@@ -337,6 +567,51 @@ class TestCycleByCyclePcaCoordinates:
         assert rms_perp < 0.5 * rms_radius, (
             f"perp RMS {rms_perp:.4f} not small relative to radius RMS {rms_radius:.4f}"
         )
+
+    # -- changing planes --
+
+    def test_local_pca_plane_tracks_true_plane(self):
+        """
+        When each cycle lies in a different plane, the fitted local PCA normal
+        for that cycle should be close to the true plane normal.
+
+        The plane normal is components[2] (the PC3 axis = the axis with
+        smallest variance, i.e. perpendicular to the plane). Alignment is
+        checked up to sign: abs(dot(fitted_normal, true_normal)) ~ 1.
+        """
+        X, phase_true, true_normals = _make_changing_planes(
+            n_cycles=6, samples_per_cycle=120, noise_std=0.01
+        )
+        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+
+        cycle_ids = sorted(models.keys())
+        for cyc in cycle_ids:
+            m = models[cyc]
+            fitted_normal = m["components"][2]  # smallest-variance direction
+            true_normal = true_normals[cyc]
+            alignment = abs(np.dot(fitted_normal, true_normal))
+            assert alignment > 0.97, (
+                f"Cycle {cyc}: fitted plane normal alignment with true normal "
+                f"is {alignment:.4f} (expected > 0.97)"
+            )
+
+    def test_perp_small_for_each_cycle_in_changing_planes(self):
+        """
+        Even when each cycle lies in a different plane, perp_local should be
+        small for near-planar cycle data.
+        """
+        X, phase_true, _ = _make_changing_planes(
+            n_cycles=6, samples_per_cycle=120, noise_std=0.01
+        )
+        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+
+        for cyc, m in models.items():
+            idx = m["indices"]
+            perp = coords.iloc[idx]["perp_local"].to_numpy()
+            rms_perp = np.sqrt(np.mean(perp ** 2))
+            assert rms_perp < 0.1, (
+                f"Cycle {cyc}: perp RMS {rms_perp:.4f} too large for near-planar data"
+            )
 
     # -- models dict contents --
 

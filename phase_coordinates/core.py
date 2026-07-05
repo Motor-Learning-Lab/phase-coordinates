@@ -2,10 +2,28 @@
 Core functions for cycle-by-cycle PCA phase coordinates.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from scipy.signal import butter, sosfiltfilt, hilbert
+
+# Minimum signal length required by sosfiltfilt with a 4th-order Butterworth
+# filter (2 second-order sections → default padlen = 3 * 2 * 2 = 12).
+_HILBERT_MIN_SAMPLES = 13
+
+# A phase step more negative than this (radians) is counted as a "large
+# backward jump".  A value of -0.5 rad is large relative to normal per-sample
+# phase increments for typical movement frequencies but small relative to the
+# π jumps that occur at amplitude nulls in multi-frequency or noisy signals.
+_PHASE_JUMP_THRESHOLD = -0.5
+
+# If the fraction of backward jumps in the central region of the signal
+# exceeds this value, a UserWarning is issued.  0.3% is essentially zero for
+# a clean single-frequency signal but is reliably exceeded by two-frequency
+# beating signals (which produce π jumps at amplitude nulls, ~0.4%).
+_NON_MONOTONIC_THRESHOLD = 0.003
 
 
 def hilbert_phase(ref_signal, fs, f_range):
@@ -16,12 +34,12 @@ def hilbert_phase(ref_signal, fs, f_range):
     ----------
     ref_signal : array-like, shape (n_time,)
         Scalar 1-D time series (e.g. one joint angle or marker coordinate).
-        Must be 1-D after conversion; multidimensional inputs are not
-        supported and will raise an error from the underlying filter.
+        Must contain only finite values.
     fs : float
-        Sampling rate in Hz.
+        Sampling rate in Hz. Must be positive.
     f_range : tuple of float
-        Bandpass frequency range (low, high) in Hz.
+        Bandpass frequency range ``(low, high)`` in Hz.
+        Must satisfy ``0 < low < high < fs / 2``.
 
     Returns
     -------
@@ -31,8 +49,53 @@ def hilbert_phase(ref_signal, fs, f_range):
         Wrapped instantaneous phase in radians (range ``[-pi, pi]``).
     amplitude : numpy.ndarray
         Instantaneous amplitude (envelope) of the analytic signal.
+
+    Raises
+    ------
+    ValueError
+        If ``ref_signal`` is not 1-D, contains non-finite values, is too
+        short for the filter, ``fs`` is not positive, or ``f_range`` is
+        invalid.
+
+    Warns
+    -----
+    UserWarning
+        If the unwrapped phase has many large negative steps in the central
+        region of the signal, indicating that the reference signal or
+        frequency band may not define a reliable instantaneous phase.
     """
     ref_signal = np.asarray(ref_signal, dtype=float)
+
+    # ---- input validation ----
+    if ref_signal.ndim != 1:
+        raise ValueError(
+            f"ref_signal must be 1-D, got shape {ref_signal.shape}."
+        )
+    if not np.all(np.isfinite(ref_signal)):
+        raise ValueError("ref_signal contains non-finite values (NaN or Inf).")
+    if len(ref_signal) < _HILBERT_MIN_SAMPLES:
+        raise ValueError(
+            f"ref_signal is too short: need at least {_HILBERT_MIN_SAMPLES} "
+            f"samples for the 4th-order bandpass filter, got {len(ref_signal)}."
+        )
+
+    fs = float(fs)
+    if fs <= 0:
+        raise ValueError(f"fs must be positive, got {fs}.")
+
+    f_range = tuple(f_range)
+    if len(f_range) != 2:
+        raise ValueError("f_range must be a length-2 sequence (low, high).")
+    low, high = f_range
+    if not (0 < low < high):
+        raise ValueError(
+            f"f_range must satisfy 0 < low < high, got ({low}, {high})."
+        )
+    if high >= fs / 2:
+        raise ValueError(
+            f"f_range high ({high} Hz) must be less than the Nyquist "
+            f"frequency (fs/2 = {fs / 2} Hz)."
+        )
 
     sos = butter(
         N=4,
@@ -47,6 +110,22 @@ def hilbert_phase(ref_signal, fs, f_range):
 
     phase_wrapped = np.angle(analytic)
     phase_unwrapped = np.unwrap(phase_wrapped)
+
+    # ---- warn on badly non-monotonic phase ----
+    n = len(phase_unwrapped)
+    trim = max(1, n // 10)
+    if n - 2 * trim > 1:
+        diffs = np.diff(phase_unwrapped[trim : n - trim])
+        neg_fraction = np.sum(diffs < _PHASE_JUMP_THRESHOLD) / len(diffs)
+        if neg_fraction > _NON_MONOTONIC_THRESHOLD:
+            warnings.warn(
+                "The unwrapped Hilbert phase has many large negative steps "
+                f"({100 * neg_fraction:.1f}% of steps in the central region). "
+                "The reference signal or frequency band may not define a "
+                "reliable instantaneous phase.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     return phase_unwrapped, phase_wrapped, np.abs(analytic)
 
@@ -68,10 +147,23 @@ def cycle_by_cycle_pca_coordinates(
     "phase plane" and the third component captures deviation perpendicular
     to that plane.
 
+    .. note::
+        **Recommended phase coordinate**: ``phase_in_cycle`` is the primary
+        timing/phase coordinate to use for cross-cycle alignment and
+        averaging. It is derived directly from the input phase estimate and
+        is consistent across cycles.
+
+        ``theta_local`` is the geometric angle in the local PCA plane and is
+        useful for describing within-cycle geometry. However, it should be
+        treated cautiously across cycles: because PCA axes can rotate, flip
+        signs, or swap when PC1/PC2 variances are similar, ``theta_local``
+        may be discontinuous or inconsistent between cycles.
+
     Parameters
     ----------
     X : array-like or pandas.DataFrame, shape (n_time, n_features)
         Multivariate movement data, e.g. x/y/z marker positions.
+        Requires at least 3 features.
     ref_signal : array-like, optional
         Scalar signal used to estimate Hilbert phase (e.g. one joint angle
         or one marker coordinate). Required when ``phase`` is not supplied.
@@ -101,7 +193,9 @@ def cycle_by_cycle_pca_coordinates(
         ``phase_wrapped``
             Phase wrapped to ``[-π, π]``.
         ``phase_in_cycle``
-            Phase within the current cycle (range ``[0, 2π)``).
+            **Primary phase coordinate.** Phase within the current cycle
+            (range ``[0, 2π)``). Use this for cross-cycle alignment and
+            averaging.
         ``amp_hilbert``
             Hilbert amplitude (``NaN`` when phase is supplied directly).
         ``pc1_local``
@@ -111,9 +205,11 @@ def cycle_by_cycle_pca_coordinates(
         ``pc3_local``
             Score along the third local principal component.
         ``theta_local``
-            Unwrapped angle in the local PCA plane (radians).
+            Unwrapped angle in the local PCA plane (radians). Useful for
+            within-cycle geometric description, but may be inconsistent
+            across cycles if PCA axes rotate or flip between cycles.
         ``theta_local_wrapped``
-            Angle in the local PCA plane wrapped to ``[-π, π]``.
+            ``theta_local`` wrapped to ``[-π, π]``.
         ``radius_local``
             Radius in the local PCA plane (Euclidean distance from the
             cycle centre in the pc1–pc2 plane).
@@ -133,7 +229,17 @@ def cycle_by_cycle_pca_coordinates(
         ``explained_variance_ratio``
             Explained variance ratio for each component.
         ``indices``
-            Time indices belonging to this cycle.
+            Integer *positional* indices (0-based) of the time points
+            belonging to this cycle in the original array/DataFrame.
+
+    Notes
+    -----
+    **Reconstruction accuracy**: for 3-feature input, reconstruction from
+    ``(pc1_local, pc2_local, pc3_local)`` via the per-cycle ``center`` and
+    ``components`` is exact (up to floating-point precision). For input with
+    more than 3 features, only 3 principal components are retained, so
+    reconstruction is generally approximate. The reconstruction error is
+    small only when the data are locally near rank-3 within each cycle.
     """
     # ---- input handling ----
     if isinstance(X, pd.DataFrame):
@@ -150,6 +256,7 @@ def cycle_by_cycle_pca_coordinates(
         raise ValueError("Need at least 3 features for local plane + perpendicular deviation.")
 
     n_time = X_arr.shape[0]
+    n_features = X_arr.shape[1]
 
     # ---- get phase ----
     if phase is None:
@@ -222,9 +329,12 @@ def cycle_by_cycle_pca_coordinates(
                     scores[:, k] *= -1
 
             # Keep right-handed orientation approximately consistent.
-            if np.dot(np.cross(components[0], components[1]), components[2]) < 0:
-                components[2] *= -1
-                scores[:, 2] *= -1
+            # np.cross is only defined for 3-D vectors; skip this check
+            # for higher-dimensional feature spaces.
+            if n_features == 3:
+                if np.dot(np.cross(components[0], components[1]), components[2]) < 0:
+                    components[2] *= -1
+                    scores[:, 2] *= -1
 
         previous_components = components.copy()
 
