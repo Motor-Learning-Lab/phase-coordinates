@@ -82,8 +82,9 @@ def _make_changing_planes(
     Generate 3D cyclic data where each cycle lies in a *different* plane.
 
     The local motion in cycle *k* is a unit circle in the (u, v) plane.
-    The plane is tilted by a different angle for each cycle via a rotation
-    around the z-axis.
+    The plane is tilted by a changing x-rotation (tilt) and optionally yawed
+    by a z-rotation; it is the x-rotation that moves the plane normal away
+    from ``[0, 0, 1]``, while the z-rotation yaws the already-tilted plane.
 
     Returns
     -------
