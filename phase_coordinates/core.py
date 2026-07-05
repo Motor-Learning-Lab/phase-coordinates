@@ -105,7 +105,14 @@ def hilbert_phase(ref_signal, fs, f_range):
         output="sos",
     )
 
-    x_filt = sosfiltfilt(sos, ref_signal)
+    try:
+        x_filt = sosfiltfilt(sos, ref_signal)
+    except ValueError as exc:
+        raise ValueError(
+            "ref_signal is too short for scipy.signal.sosfiltfilt with the "
+            "chosen 4th-order bandpass filter. Use a longer signal, use a "
+            "lower-order filter in the future, or provide a precomputed phase."
+        ) from exc
     analytic = hilbert(x_filt)
 
     phase_wrapped = np.angle(analytic)
@@ -146,6 +153,14 @@ def cycle_by_cycle_pca_coordinates(
     cycle. Within each cycle, the first two principal components span the
     "phase plane" and the third component captures deviation perpendicular
     to that plane.
+
+    .. note::
+        **Cycle anchoring**: Cycles are defined from ``phase - phase[0]``.
+        Cycle boundaries are therefore phase-based and anchored to the first
+        sample of the recording, not to any external behavioural event (such
+        as heel strike, peak flexion, or movement onset).  Users who need
+        event-anchored cycles should supply a ``phase`` variable that is
+        itself anchored to that event.
 
     .. note::
         **Recommended phase coordinate**: ``phase_in_cycle`` is the primary
@@ -272,6 +287,12 @@ def cycle_by_cycle_pca_coordinates(
         )
     else:
         phase = np.asarray(phase, dtype=float)
+        if phase.ndim != 1:
+            raise ValueError(
+                f"phase must be 1-D, got shape {phase.shape}."
+            )
+        if not np.all(np.isfinite(phase)):
+            raise ValueError("phase contains non-finite values (NaN or Inf).")
         phase_wrapped = np.angle(np.exp(1j * phase))
         amp_hilbert = np.full(n_time, np.nan)
 

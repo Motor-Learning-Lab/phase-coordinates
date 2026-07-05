@@ -102,9 +102,12 @@ def _make_changing_planes(
     true_normals = []
 
     for cyc in range(n_cycles):
-        # Different tilt for every cycle: cycle k tilted by k * 30 degrees
-        tilt = cyc * (np.pi / 6)  # 30 degrees per cycle
-        R = _rotation_matrix_z(tilt)
+        # Different yaw and tilt for every cycle so the plane normal actually
+        # changes: tilt rotates the z-axis away from [0,0,1], producing a
+        # normal with varying x/y/z components.
+        yaw = cyc * (np.pi / 6)   # 30 degrees per cycle (optional for normal)
+        tilt = cyc * (np.pi / 6)  # 30 degrees per cycle — this changes normal
+        R = _rotation_matrix_z(yaw) @ _rotation_matrix_x(tilt)
 
         # True normal of this cycle's plane (z-axis rotated by R)
         normal = R @ np.array([0.0, 0.0, 1.0])
@@ -220,6 +223,19 @@ class TestHilbertPhase:
     def test_raises_on_signal_too_short(self):
         fs = 100.0
         sig = np.ones(5)  # fewer than 13 samples
+        with pytest.raises(ValueError, match="too short"):
+            hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
+
+    def test_raises_on_signal_too_short_for_sosfiltfilt(self):
+        """
+        A signal > _HILBERT_MIN_SAMPLES but still too short for sosfiltfilt
+        (padlen=27 for 4-section SOS) should raise a clear ValueError, not a
+        raw scipy padding error.
+        """
+        fs = 100.0
+        # 20 samples: passes the _HILBERT_MIN_SAMPLES=13 check but is shorter
+        # than sosfiltfilt's padlen of 27 for a 4th-order bandpass SOS filter.
+        sig = np.sin(np.linspace(0, 2 * np.pi, 20))
         with pytest.raises(ValueError, match="too short"):
             hilbert_phase(sig, fs=fs, f_range=(1.0, 4.0))
 
@@ -369,6 +385,26 @@ class TestCycleByCyclePcaCoordinates:
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
         with pytest.raises(ValueError, match="length"):
             cycle_by_cycle_pca_coordinates(X, phase=phase_true[:-10])
+
+    def test_raises_on_2d_phase(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
+        phase_2d = np.tile(phase_true, (2, 1))  # shape (2, n_time)
+        with pytest.raises(ValueError, match="1-D"):
+            cycle_by_cycle_pca_coordinates(X, phase=phase_2d)
+
+    def test_raises_on_phase_with_nan(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
+        phase_nan = phase_true.copy()
+        phase_nan[10] = np.nan
+        with pytest.raises(ValueError, match="non-finite"):
+            cycle_by_cycle_pca_coordinates(X, phase=phase_nan)
+
+    def test_raises_on_phase_with_inf(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
+        phase_inf = phase_true.copy()
+        phase_inf[50] = np.inf
+        with pytest.raises(ValueError, match="non-finite"):
+            cycle_by_cycle_pca_coordinates(X, phase=phase_inf)
 
     # -- cycle detection --
 
@@ -569,6 +605,19 @@ class TestCycleByCyclePcaCoordinates:
         )
 
     # -- changing planes --
+
+    def test_changing_planes_normals_actually_vary(self):
+        """
+        _make_changing_planes must produce true normals that genuinely differ
+        across cycles. This guards against the bug where rotating around z only
+        left every normal at [0, 0, 1].
+        """
+        _, _, true_normals = _make_changing_planes(n_cycles=6, samples_per_cycle=120)
+        normals = np.array(true_normals)
+        assert np.std(normals, axis=0).max() > 0.1, (
+            "True normals from _make_changing_planes do not vary across cycles "
+            f"(max per-axis std = {np.std(normals, axis=0).max():.4f})."
+        )
 
     def test_local_pca_plane_tracks_true_plane(self):
         """

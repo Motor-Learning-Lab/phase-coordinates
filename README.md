@@ -24,6 +24,12 @@ each cycle and returns, for every time point:
 > `theta_local` may be discontinuous between cycles.  Use `phase_in_cycle`
 > for reliable cross-cycle alignment.
 
+> **Cycle anchoring.**  Cycles are defined from `phase - phase[0]`, so cycle
+> boundaries are phase-based and anchored to the **first sample** of the
+> recording, not to any external behavioural event (e.g. heel strike, peak
+> flexion, or movement onset).  Users who need event-anchored cycles should
+> supply a `phase` variable that is itself anchored to the relevant event.
+
 > **Reconstruction accuracy.**  For **3-feature** input, reconstruction
 > from `(pc1_local, pc2_local, pc3_local)` together with the per-cycle
 > `center` and `components` is exact up to floating-point precision (the
@@ -127,7 +133,7 @@ phase_coordinates/      Python package
     __init__.py         Public API exports
     core.py             hilbert_phase, cycle_by_cycle_pca_coordinates
 tests/
-    test_phase_coordinates.py   pytest test suite (46 tests)
+    test_phase_coordinates.py   pytest test suite (51 tests)
 notebooks/
     demo.ipynb          End-to-end demo notebook
 pyproject.toml          Project metadata and build configuration
