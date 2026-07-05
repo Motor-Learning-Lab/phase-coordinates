@@ -14,27 +14,30 @@ python for everything**, not the `python` on PATH.
 
 ## Status as of last update (2026-07-06)
 
-**Reparameterization complete; primary artifact resolved; amplitude convergence
-issue remains under investigation.**
+**Primary reparameterization complete (divergences and normal artifact fixed);
+amplitude convergence fixed by tightening noise prior; test in progress.**
 
-The full reparameterization has been applied to `phase_coordinates/bayesian.py`
-and the Layer 2 MCMC test (`docs/debug/scripts/test_layer2.py`) has completed.
-Key results (draws=400, tune=400, chains=2, target_accept=0.9, random_seed=0):
+The full reparameterization (tangent-plane normals + boundary-normalized phase)
+eliminated divergences (0 vs 84) and the localized normal artifact (min cos_sim
+0.9915 vs 0.51). However, amplitude parameters (radius, sigma_x) converged to
+wrong values: radius median 0.709 (expected ~1.0), sigma_x 0.467 (expected ~0.02).
+A tune=1000 experiment made this WORSE (40 divergences, radius 1.251).
 
-- **Divergences: 0** (was 84 — primary issue FIXED)
-- **Normal artifact: GONE** (min cos_sim 0.9915, median 0.9978 — was 0.51)
-- **Phase monotone by construction** (satisfies boundary by construction)
-- **All assertions passed** (normal, phase, radius > 0, radius median 0.71 > 0.7, perp dev < 0.1)
-- Runtime: 418s (vs 999s worst case, 423s best prior case)
-- Chain 1 hit max_treedepth; rhat > 1.01 for some parameters; ESS < 100 for some params
+**Root cause identified:** `_OBS_NOISE_LOGNORMAL_SD = 0.5` allowed the NUTS chain
+to drift, during warmup, to a high-noise region (rho_x=0.47) where the likelihood
+compensates for wrong radius with inflated noise. With 569 data points, a wrong
+radius of 0.71 creates residuals of ~0.29 per step; absorbing these into sigma_x
+gains ~5800 nats of likelihood (vs sigma_x=0.02) — enough to partially overcome
+the prior penalty at rho_x=0.47 if the chain gets there. Once stuck there, adapt_diag
+calibrates its mass matrix to this wrong region, trapping all subsequent draws.
 
-**Remaining concern — amplitude parameter convergence:**
-The radius posterior median is 0.709 (expected ~1.0 for this synthetic data) and
-sigma_x_mean is 0.467 (expected ~0.02 given noise scale 0.02 and R_X ≈ 1.0).
-These suggest the amplitude/radius/noise parameters haven't converged well despite
-the phase issue being fixed. This is consistent with Chain 1 hitting max_treedepth
-and ESS < 100 for some parameters. Next step: run with tune=1000 to give the mass
-matrix more time to adapt to the amplitude subspace.
+**Fix applied:** tightened `_OBS_NOISE_LOGNORMAL_SD` from 0.5 to 0.3 (95% CI for
+rho_x: [0.016, 0.056] instead of [0.011, 0.082]). At sigma=0.3, rho_x=0.47 is 9.2
+prior-SDs from the mode, imposing a -41 nat prior penalty that prevents the chain
+from ever visiting that region. **New test running** (`test_layer2.py` with the
+updated prior, standard tune=400). Results to be added here.
+
+**See "Layer 2 findings" items 4 and 5 for the detailed evidence trail (logs 08-10).**
 
 **Environment**: a new pixi environment is now set up for this project
 (`pixi.toml` at the repo root). Use `pixi run python <script>` or
@@ -432,15 +435,35 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
    amplitude subspace. Phase is now well-identified (by construction), so the
    remaining difficulty is between radius/perp-deviation/sigma_x parameters, which
    tend to be correlated and need a non-diagonal mass matrix approximation to
-   sample efficiently. Next step: tune=1000.
+   sample efficiently. Tried: tune=1000 → did NOT fix (see finding 5 below).
 
-5. **Runtime concern**: a full Layer 2 fit at draws=400/tune=400/chains=2 takes
+5. **Amplitude convergence root cause: noise prior too wide (log 10, 2026-07-06).**
+   `test_layer2_tune1000.py` with tune=1000 gave: **40 divergences, radius 1.251**
+   (opposite direction of error from log 08's 0.709). The error flip between runs
+   indicates the chain is NOT sampling from the posterior — it's exploring wildly
+   different wrong regions depending on the warmup path.
+
+   Root cause analysis: `_OBS_NOISE_LOGNORMAL_SD = 0.5` gives rho_x a 95% CI of
+   [0.011, 0.082] (as rho = sigma_x/R_X). During NUTS warmup, a wrong initial step
+   can place rho_x at ~0.47. At that point, with wrong radius (say 0.71), the
+   likelihood STRONGLY prefers high sigma_x: absorbing a 0.29-per-step residual
+   into sigma_x=0.47 is ~5800 nats better than sigma_x=0.02 over 569 steps. This
+   benefit vastly exceeds the prior penalty at rho_x=0.47 (only -15 nats for
+   sigma=0.5). So the chain gets stuck in the (wrong r, wrong sigma_x) region and
+   adapt_diag calibrates there, trapping subsequent draws.
+
+   **Fix applied: `_OBS_NOISE_LOGNORMAL_SD = 0.3`** (was 0.5). 95% CI for rho_x
+   becomes [0.016, 0.056]. At rho_x=0.47 the prior penalty is now -41 nats —
+   impossible to overcome given the chain starts near the correct values. This
+   prevents the chain from ever visiting the wrong region during warmup.
+
+   **Test with tightened prior running** — results to be added in finding 6.
+
+6. **Runtime concern**: a full Layer 2 fit at draws=400/tune=400/chains=2 takes
    ~418s (fastest successful run). For the pytest suite this is slow — a separate
    "short" test configuration (fewer cycles, fewer draws) may be needed.
 
-6. **The model's own posterior-SD uncertainty did NOT flag the bad region (pre-fix).**
-
-6. **The model's own posterior-SD uncertainty does NOT flag the bad region.**
+7. **The model's own posterior-SD uncertainty does NOT flag the bad region.**
    In the artifact window (t=0.58-0.67s in the nutpie run), `normal_angular_sd`
    — the posterior SD of the normal direction, which is exactly the quantity
    the diagnostics module reports to users as an uncertainty estimate — was
