@@ -1,23 +1,32 @@
 # Bayesian Two-Layer Phase Coordinate Estimation Specification
 
-This document specifies a Bayesian extension to the existing `phase_coordinates` package. The new estimator should live next to the current deterministic cycle-fixed estimator; it should not replace `hilbert_phase` or `cycle_by_cycle_pca_coordinates`.
+This document specifies a Bayesian extension to the existing `phase_coordinates` package. The Bayesian estimator should live next to the deterministic cycle-fixed estimator. It should not replace `hilbert_phase` or `cycle_by_cycle_pca_coordinates`.
 
 The target use case is 3D rhythmic movement data where we want posterior estimates of phase, radius, smoothly varying cycle-plane normal, center, and perpendicular deviation.
+
+This version of the specification reflects the current debugging conclusion from the Layer 2 convergence work:
+
+1. The coarse cycle model remains useful and mostly unchanged.
+2. The original Layer 2 normal model, which splined raw unconstrained 3D vectors and then normalized them, is too fragile.
+3. The original Layer 2 phase model, which used a positive velocity spline plus a tight soft boundary potential, creates difficult NUTS geometry.
+4. The next implementation should use tangent-plane normal deviations and a phase parameterization that satisfies cycle boundaries by construction.
+
+All equations below use `$...$` or `$$...$$` math delimiters so they render correctly in Markdown contexts used by this project.
 
 ## Core idea
 
 Use two models rather than one monolithic model.
 
-1. **Coarse cycle model**: estimate dominant frequency, cycle boundaries, cycle centers, cycle-level normals, and boundary reference directions, while keeping posterior uncertainty.
-2. **Instantaneous model**: use the coarse posterior summaries as priors for smoothly varying instantaneous quantities.
+1. **Layer 1: coarse cycle model** estimates dominant frequency, cycle boundaries, cycle centers, cycle-level normals, and boundary reference directions, while keeping posterior uncertainty.
+2. **Layer 2: instantaneous model** uses the coarse posterior summaries as priors for smoothly varying instantaneous quantities.
 
-The coarse model estimates cycle-level objects:
+Layer 1 estimates cycle-level objects:
 
 $$
 \tau_k,\quad T_k,\quad c_k,\quad n_k,\quad a_k
 $$
 
-The instantaneous model estimates time-level objects:
+Layer 2 estimates time-level objects:
 
 $$
 \phi(t),\quad \omega(t),\quad c(t),\quad n(t),\quad e_1(t),\quad e_2(t),\quad r(t),\quad z(t)
@@ -64,6 +73,8 @@ All spatial priors should be expressed relative to $R_X$.
 
 ## Layer 1: coarse cycle model
 
+Layer 1 can continue to use the existing implementation strategy unless debugging shows otherwise.
+
 ### Frequency and duration
 
 Estimate a crude dominant frequency $f_0$ using periodogram, autocorrelation, Hilbert phase, or peak/event detection. Define:
@@ -77,8 +88,6 @@ Use a log-duration prior:
 $$
 \log T_k \sim \mathcal{N}(\log T_0,0.15^2)
 $$
-
-This makes duration positive and allows roughly 25--35% variation across cycles before the prior becomes strongly skeptical.
 
 ### Boundary times
 
@@ -140,7 +149,7 @@ If the recording has large drift, increase $0.10R_X$ to $0.20R_X$.
 
 ### Cycle normal
 
-Use a normalized unconstrained vector. Let $u_k\in\mathbb{R}^3$:
+Layer 1 may use a normalized unconstrained vector. Let $u_k\in\mathbb{R}^3$:
 
 $$
 n_k=\frac{u_k}{\lVert u_k\rVert}
@@ -152,13 +161,23 @@ $$
 u_k\sim\mathcal{N}(\hat{n}_k,0.20^2I)
 $$
 
-Add angular smoothness:
+Add angular smoothness. The literal prior was:
 
 $$
 \cos^{-1}\left(\left|n_k^\top n_{k-1}\right|\right)\sim\operatorname{HalfNormal}(0.10)
 $$
 
-The absolute value handles normal sign ambiguity.
+In implementation, avoid the literal `arccos` potential because it has a gradient singularity near perfect alignment. Use the already implemented smooth small-angle proxy:
+
+$$
+\log p(n_k,n_{k-1}) \propto -\frac{1-|n_k^\top n_{k-1}|}{\sigma_n^2}
+$$
+
+with:
+
+$$
+\sigma_n = 0.10
+$$
 
 ### Boundary direction
 
@@ -181,10 +200,11 @@ Layer 1 should return posterior summaries for:
 - $a_k$
 - $\mu_\tau$
 - $\Sigma_\tau$ or $\sigma_\tau^{(x)}$
+- posterior angular SD for each $n_k$
 
 ## Layer 2: instantaneous model
 
-Layer 2 uses the Layer 1 posterior summaries as priors. This is a modular Bayesian handoff rather than a single joint model.
+Layer 2 uses Layer 1 posterior summaries as priors. This is a modular Bayesian handoff rather than a single joint model.
 
 ### Uncertainty propagation
 
@@ -200,7 +220,7 @@ $$
 v^{(2)}\sim\mathcal{N}\left(\mathbb{E}[v^{(1)}\mid X],1.5^2\operatorname{Cov}[v^{(1)}\mid X]\right)
 $$
 
-If full covariance is inconvenient, use componentwise posterior SDs.
+If full covariance is inconvenient, use componentwise posterior SDs for ordinary Euclidean quantities such as center and boundary direction.
 
 Use uncertainty floors:
 
@@ -212,37 +232,123 @@ $$
 \sigma_{c,k}^{(2)}=\max(1.5s_{c,k}^{(1)},0.02R_X)
 $$
 
-$$
-\sigma_{u,k}^{(2)}=\max(1.5s_{u,k}^{(1)},0.03)
-$$
-
-### Cubic splines
-
-Use cubic splines for speed and smoothness. Spline unconstrained quantities and then transform.
-
-Center:
+For Layer 2 normals, do **not** use componentwise $u$ SD as the main uncertainty scale. Use Layer 1 angular posterior SD instead:
 
 $$
-c(t)=\operatorname{CubicSpline}(\tau_k,c_k^{(2)})(t)
+\sigma_{\theta,k}^{(2)}=\max(1.5s_{\theta,k}^{(1)},0.03)
 $$
 
-Normal:
+where $s_{\theta,k}^{(1)}$ is the Layer 1 posterior angular SD for $n_k$.
+
+## Layer 2 normal parameterization: tangent-plane deviations
+
+The previous Layer 2 parameterization splined raw unconstrained 3D vectors and then normalized:
 
 $$
-u(t)=\operatorname{CubicSpline}(\tau_k,u_k^{(2)})(t)
+u(t)=\operatorname{CubicSpline}(u_k)(t)
 $$
 
 $$
 n(t)=\frac{u(t)}{\lVert u(t)\rVert}
 $$
 
-Boundary direction:
+This is fragile. If adjacent $u_k$ knots drift toward opposite signs or incompatible directions, the spline can pass near zero:
 
 $$
-a(t)=\operatorname{CubicSpline}(\tau_k,a_k^{(2)})(t)
+\lVert u(t)\rVert \approx 0
 $$
 
-### Boundary-anchored coordinate frame
+Then $u(t)/\lVert u(t)\rVert$ becomes arbitrary, producing localized but confident-looking normal artifacts.
+
+Replace this with tangent-plane normal deviations around the Layer 1 posterior mean normals.
+
+Let $m_j$ be the padded Layer 1 posterior mean normal at Layer 2 normal knot $j$. Ensure signs are aligned so adjacent $m_j$ satisfy:
+
+$$
+m_j^\top m_{j-1} > 0
+$$
+
+Construct a deterministic orthonormal tangent basis $Q_j\in\mathbb{R}^{3\times 2}$ such that:
+
+$$
+Q_j^\top Q_j=I
+$$
+
+$$
+Q_j^\top m_j=0
+$$
+
+Sample two-dimensional angular deviations:
+
+$$
+\delta_j\sim\mathcal{N}(0,(\sigma_{\theta,j}^{(2)})^2I_2)
+$$
+
+Then define Layer 2 normal knots by:
+
+$$
+\tilde{n}_j=m_j+Q_j\delta_j
+$$
+
+$$
+n_j^{(2)}=\frac{\tilde{n}_j}{\lVert\tilde{n}_j\rVert}
+$$
+
+This removes the meaningless radial degree of freedom in $u_j$ and makes the prior scale genuinely angular.
+
+Add Layer 2 normal smoothness across adjacent normal knots:
+
+$$
+\log p(n_j^{(2)},n_{j-1}^{(2)}) \propto -\frac{1-n_j^{(2)\top}n_{j-1}^{(2)}}{\sigma_{\Delta n}^2}
+$$
+
+Use:
+
+$$
+\sigma_{\Delta n}=0.05\text{ to }0.10
+$$
+
+Start with:
+
+$$
+\sigma_{\Delta n}=0.10
+$$
+
+Because signs are explicitly aligned, do not use absolute value in this Layer 2 smoothness term unless later evidence shows sign ambiguity has returned.
+
+For instantaneous normals, spline the normal knots themselves and then renormalize:
+
+$$
+\bar{n}(t)=\operatorname{CubicSpline}(\tau_j,n_j^{(2)})(t)
+$$
+
+$$
+n(t)=\frac{\bar{n}(t)}{\lVert\bar{n}(t)\rVert}
+$$
+
+This is still not a perfect geodesic spline on $S^2$, but it avoids the worst failure mode: raw unconstrained $u(t)$ passing through zero.
+
+## Layer 2 center and boundary direction splines
+
+Center remains an ordinary Euclidean spline:
+
+$$
+c(t)=\operatorname{CubicSpline}(\tau_j,c_j^{(2)})(t)
+$$
+
+Boundary direction remains an ordinary Euclidean spline:
+
+$$
+a(t)=\operatorname{CubicSpline}(\tau_j,a_j^{(2)})(t)
+$$
+
+Add a floor for boundary-direction uncertainty, which was missing in the first implementation:
+
+$$
+\sigma_{a,k}^{(2)}=\max(1.5s_{a,k}^{(1)},0.02R_X)
+$$
+
+## Boundary-anchored coordinate frame
 
 Define the in-plane x-axis by projecting $a(t)$ into the instantaneous plane:
 
@@ -258,57 +364,87 @@ $$
 
 This fixes the in-plane gauge and avoids a separate free in-plane spin parameter.
 
-### Positive phase-velocity spline
+## Layer 2 phase parameterization: satisfy boundaries by construction
 
-Let $g(t)$ be a cubic spline with a moderate number of knots. Define:
+The previous implementation used:
 
 $$
 \omega(t)=\exp(g(t))
 $$
 
-Then:
-
 $$
-\phi(t)=\phi_0+\int_0^t\omega(s)\,ds
+\phi_t=\phi_{t-1}+\omega_t\Delta t
 $$
 
-Discrete implementation:
-
-$$
-\Delta\phi_t=\omega_t\Delta t
-$$
-
-$$
-\phi_t=\phi_{t-1}+\Delta\phi_t
-$$
-
-This makes phase monotone by construction.
-
-Use:
-
-$$
-g_j\sim\mathcal{N}(\log\omega_0,0.20^2)
-$$
-
-where:
-
-$$
-\omega_0=\frac{2\pi}{T_0}
-$$
-
-and:
-
-$$
-g_j-g_{j-1}\sim\mathcal{N}(0,0.15^2)
-$$
-
-Boundary phase constraints:
+plus a tight soft boundary potential:
 
 $$
 \phi(\tau_k)-2\pi k\sim\mathcal{N}(0,0.15^2)
 $$
 
-### Radius and perpendicular deviation
+This creates difficult NUTS geometry because a small number of spline coefficients must satisfy several tight nonlinear cumulative constraints.
+
+Replace it with a boundary-normalized positive phase-speed model. Within each cycle, define a positive unnormalized speed:
+
+$$
+s(t)=\exp(q(t))
+$$
+
+For $\tau_k\le t\le\tau_{k+1}$, define:
+
+$$
+\phi(t)=2\pi k+2\pi\frac{\int_{\tau_k}^{t}s(v)\,dv}{\int_{\tau_k}^{\tau_{k+1}}s(v)\,dv}
+$$
+
+This guarantees:
+
+$$
+\phi(\tau_k)=2\pi k
+$$
+
+$$
+\phi(\tau_{k+1})=2\pi(k+1)
+$$
+
+and phase is monotone because $s(t)>0$.
+
+In discrete implementation, for samples $i$ inside cycle $k$:
+
+$$
+w_i=\exp(q_i)
+$$
+
+$$
+S_{k,i}=\sum_{j\in k,\ j<i} w_j\Delta t
+$$
+
+$$
+S_{k,\mathrm{total}}=\sum_{j\in k}w_j\Delta t
+$$
+
+$$
+\phi_i=2\pi k+2\pi\frac{S_{k,i}}{S_{k,\mathrm{total}}}
+$$
+
+This removes the `phase_boundary` potential from Layer 2. A weak prior on $q(t)$ and smoothness of $q(t)$ controls within-cycle acceleration and deceleration.
+
+Use a spline or low-rank basis for $q(t)$, with mean-zero or weakly centered deviations so the normalization, not the absolute offset of $q(t)$, determines the cycle duration.
+
+For example:
+
+$$
+q_j\sim\mathcal{N}(0,0.20^2)
+$$
+
+and:
+
+$$
+q_j-q_{j-1}\sim\mathcal{N}(0,0.15^2)
+$$
+
+Because the per-cycle normalization removes the absolute scale of $s(t)$, avoid adding unidentified global offsets to $q(t)$ unless they are explicitly constrained.
+
+## Radius and perpendicular deviation
 
 Radius is positive:
 
@@ -322,7 +458,9 @@ $$
 z(t)=h_z(t)
 $$
 
-### Observation model
+Continue to use smooth spline priors for $h_r(t)$ and $h_z(t)$.
+
+## Observation model
 
 The instantaneous observation model is:
 
@@ -365,6 +503,13 @@ Posterior mean or median values for practical analysis:
 
 Credible intervals or posterior SDs for key quantities.
 
+For normals, report at least:
+
+- angular SD around the posterior mean direction
+- raw mean resultant length or equivalent diagnostic showing whether the mean normal is stable before normalization
+
+The mean resultant length diagnostic is important because normalizing a small posterior mean vector can produce a confident-looking but misleading direction.
+
 ### Bayesian report
 
 Optional full posterior object, such as an ArviZ `InferenceData`. Only retain this if `return_report=True`; otherwise compute summaries and discard heavy posterior draws.
@@ -401,6 +546,22 @@ Normal dominated by prior:
 
 Warn if the posterior angular shift from the prior is less than $0.25$ of the prior angular SD and the posterior SD remains larger than $0.75$ of the prior SD.
 
+Low normal mean resultant length:
+
+Let $\bar{n}_{\mathrm{raw}}(t)$ be the unnormalized posterior mean of normal samples:
+
+$$
+\bar{n}_{\mathrm{raw}}(t)=\mathbb{E}[n(t)\mid X]
+$$
+
+Warn if:
+
+$$
+\lVert\bar{n}_{\mathrm{raw}}(t)\rVert < 0.80
+$$
+
+This catches cases where the normalized reported mean direction may be misleading.
+
 Large perpendicular deviation:
 
 $$
@@ -434,15 +595,23 @@ Observation noise:
 - warn if $\sigma_x/R_X>0.10$.
 - warn strongly if $\sigma_x/R_X>0.25$.
 
-Phase monotonicity should be guaranteed by positive increments, but still include a sanity check.
+Phase monotonicity should be guaranteed by construction, but still include a sanity check.
 
-## Implementation order
+Divergences and treedepth:
 
-1. Robust scale computation and deterministic seeds.
-2. Layer 1 coarse summaries or coarse Bayesian prototype.
-3. Result dataclasses for estimates, uncertainty, diagnostics, and optional report.
-4. Layer 2 priors from Layer 1 summaries using the $1.5$ padding rule.
-5. Cubic spline helpers and positive phase velocity spline.
-6. Frame construction from $n(t)$ and $a(t)$.
-7. Observation model.
-8. Synthetic tests with known ground truth.
+- hard-fail if post-tuning divergences are nonzero in final test configurations.
+- warn if any chain reaches maximum treedepth.
+- report `r_hat` and ESS summaries for final Bayesian reports.
+
+## Implementation order for the current reparameterization pass
+
+1. Add tangent-basis utilities for normals.
+2. Replace Layer 2 `u2` raw-vector spline with tangent-plane normal deviations.
+3. Add Layer 2 normal-knot smoothness.
+4. Add a floor for Layer 2 boundary-direction prior SD.
+5. Add normal mean-resultant-length uncertainty diagnostic.
+6. Replace the soft `phase_boundary` potential with boundary-normalized positive phase by construction.
+7. Re-run the existing debug scripts.
+8. Only then tune NUTS settings such as `target_accept` or treedepth.
+
+The current best hypothesis is that the visible normal artifact is primarily caused by the old Layer 2 normal parameterization, while the divergences are primarily driven by the old soft-boundary phase model. The reparameterization should address both rather than treating the problem as mere sampler tuning.
