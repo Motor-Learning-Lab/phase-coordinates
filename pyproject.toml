@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phase-coordinates"
+version = "0.1.0"
+description = "Cycle-by-cycle PCA phase coordinates for multivariate cyclic motion"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "nbformat",
+    "jupyter",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["phase_coordinates*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
