@@ -1,0 +1,21 @@
+[workspace]
+name = "phase-coordinates"
+version = "0.1.0"
+description = "Cycle-by-cycle PCA phase coordinates for multivariate cyclic motion"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.12.*"
+numpy = "*"
+scipy = "*"
+pandas = "*"
+scikit-learn = "*"
+pymc = ">=6"
+arviz = ">=1.1"
+numba = "*"
+pytensor = "*"
+pytest = "*"
+
+[pypi-dependencies]
+phase-coordinates = { path = ".", editable = true }

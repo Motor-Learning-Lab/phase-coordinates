@@ -7,14 +7,19 @@ two-layer estimator (`phase_coordinates/bayesian.py`). See
 supporting evidence, kept so a different agent/session can inspect raw
 numbers and rerun things without re-deriving them.
 
-All scripts assume the miniforge conda environment
-(`/c/Users/User/miniforge3/python.exe` on the machine these were produced on
-— has numpy/pandas/sklearn/scipy/pymc 5.28/arviz 0.23/numba installed; the
-default `python` on PATH has none of these). Run from repo root, or edit the
-`sys.path.insert(0, r"D:\Repositories\phase-coordinates")` line at the top of
-each script to point at wherever the repo lives. Each script needs the
-package importable — either that `sys.path.insert` line, or
-`pip install -e ".[dev]" --no-deps` into the environment you're using.
+All scripts can now be run with:
+
+```bash
+pixi run python docs/debug/scripts/<script>.py
+```
+
+from the repo root (the pixi environment at the repo root has all required
+packages). The scripts auto-detect the repo root via `__file__`, so the
+hard-coded Windows path (`D:\Repositories\phase-coordinates`) is no longer
+needed (the updated scripts handle both Linux and Windows via `os.path`).
+
+Legacy note: the original miniforge environment (`/c/Users/User/miniforge3/python.exe`
+on Windows) is superseded by the `pixi.toml` environment added on 2026-07-05.
 
 ## scripts/
 
@@ -47,6 +52,30 @@ etc.) is the interpreted result.
 | `05_layer2_nutpie_signflip_221s.log` | `test_layer2.py` (with `nuts_sampler="nutpie"`, later reverted) | 12 vel knots, nutpie backend, no working initvals (nutpie doesn't honor PyMC's `initvals=`) | 221s (much faster than plain PyMC), but **min cos_sim 0.40** — the sign/spline-excursion artifact, attributed at the time to nutpie's own default (jittered) initialization not being controllable. |
 | `06_layer2_initvals_run_interrupted_by_crash.log` | `test_layer2.py` (plain PyMC + explicit `initvals=` fix applied) | 12 vel knots, target_accept=0.9 | Session crashed mid-run; Layer 1 had completed cleanly (34s, 0 divergences, no rhat warnings). Layer 2 had just started sampling. Superseded by log 07 (rerun after crash). |
 | `07_layer2_initvals_rerun_84div_999s_WORST.log` | `test_layer2.py` (same as 06, rerun after crash) | 12 vel knots, target_accept=0.9, plain PyMC, explicit initvals for every free var | **999s, 84 divergences** (worse than log 02's 17) — explicit initvals did not fix the problem and made sampling harder, not easier. min cos_sim 0.51 (same artifact, still present). This is the strongest evidence that **initialization is not the (main) root cause** — Layer 1's identical fix (explicit initvals + `init="adapt_diag"`) fully resolved its own, mechanistically similar sign-flip bug, but the same fix did not transfer to Layer 2. |
+
+## Reparameterization implemented (2026-07-05)
+
+All changes from `docs/claude_layer2_reparameterization_prompt.md` have been
+applied to `phase_coordinates/bayesian.py`. See `docs/PROGRESS.md` for the
+full list. Key changes:
+
+1. **Normal**: `u2 ~ N(u_mean, sigma_u2)` replaced by tangent-plane deviations
+   `delta_n ~ N(0, sigma_theta2 * I_2)` with Layer 1 angular SD as scale.
+   Normalized normal knots spliced into a spline, then renormalized at each t.
+   Adjacent-knot smoothness Potential added (`sigma_Delta_n = 0.10`).
+
+2. **Phase**: `phi0`, `g_knots`, and `phase_boundary` Potential removed entirely.
+   Replaced by `q_knots ~ N(0, 0.20^2)` with boundary-normalized positive speed:
+   `phi(t) = 2*pi*k + 2*pi * S_{k,t} / S_{k,total}`. Boundaries satisfied by
+   construction.
+
+3. **`sigma_a2` floor**: 0.02*R_X floor added (was missing before).
+
+4. **Resultant-length diagnostic**: `_compute_diagnostics` now warns if
+   `||E[n(t)|X]|| < 0.80`.
+
+**Test run launched**: `pixi run python docs/debug/scripts/test_layer2.py`.
+Will add results log and update this README when it completes.
 
 ## Current best hypothesis (not confirmed)
 

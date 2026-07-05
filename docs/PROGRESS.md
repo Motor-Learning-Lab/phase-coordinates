@@ -12,30 +12,73 @@ which already has the two spec docs; NOT based on `main`, which lacks them).
 Environment notes (see "Environment" section below) — **use the miniforge
 python for everything**, not the `python` on PATH.
 
-## Status as of last update
+## Status as of last update (2026-07-05)
 
-**Handed off for reparameterization debugging.** All of Layer 1, Layer 2,
-diagnostics, and the public API are implemented in
-`phase_coordinates/bayesian.py` (~1130 lines). Utility functions and Layer 1
-are fully validated with passing standalone checks. Layer 2 is implemented
-and structurally correct (frame construction, splines, likelihood all
-verified right when sampling behaves), but NUTS sampling for Layer 2 has an
-unresolved convergence problem: a high divergence rate (10-20%) and, correlated
-with it, a localized sign/spline-excursion artifact in the recovered
-instantaneous normal in one narrow time window. Two rounds of fixes (see
-"Layer 2 findings" below) did not resolve it — the second attempt (explicit
-`initvals`) made it *worse* (84 divergences, ~1000s runtime, same artifact).
+**Reparameterization implemented; Layer 2 test run in progress.**
+The full reparameterization described in `docs/bayesian_two_layer_spec.md`
+and `docs/claude_layer2_reparameterization_prompt.md` has been applied to
+`phase_coordinates/bayesian.py`. All non-MCMC tests pass. The Layer 2 MCMC
+test (`docs/debug/scripts/test_layer2.py`) is running in background —
+results will be added here when it completes.
 
-**All raw diagnostic scripts and run logs behind these findings are committed
-under `docs/debug/` (see `docs/debug/README.md` for an index) — start there
-for concrete numbers, a root-cause hypothesis, and a prioritized list of
-untried reparameterization ideas.** The user has asked for a fresh
-agent/session to focus specifically on debugging the model's
-*parameterization* (not the fallback options below, at least not yet). Each
-full test iteration costs ~15-20 minutes in this environment (no C++
-compiler, single-core sampling — see "Environment" below for real timing
-numbers and how to reproduce), so prioritize the cheap isolation experiment
-in `docs/debug/README.md` idea #1 before broad parameter sweeps.
+**Environment**: a new pixi environment is now set up for this project
+(`pixi.toml` at the repo root). Use `pixi run python <script>` or
+`pixi run pytest` instead of the miniforge python from the old Windows notes.
+The pixi env has PyMC 6.0.1, ArviZ 1.2.0, numba 0.65.1.
+
+### Reparameterization changes applied (2026-07-05)
+
+1. **New utilities**: `align_normal_signs(normals)` and
+   `orthonormal_tangent_basis(normals)` added to `bayesian.py`. All tests
+   pass (unit norm, orthogonal to normal, mutually orthogonal, edge cases
+   near coordinate axes, sign alignment).
+
+2. **Layer 2 normal**: replaced the raw-vector `u2 ~ N(u_mean_p, sigma_u2)`
+   spline with tangent-plane deviations `delta_n ~ N(0, sigma_theta2 * I_2)`.
+   The prior scale `sigma_theta2` now uses Layer 1 angular posterior SD (not
+   componentwise vector SD), with floor 0.03 rad. Spline still goes through
+   the normalized normal knots, followed by renormalization at each time step.
+
+3. **Layer 2 normal smoothness**: added a `normal2_smoothness` Potential
+   across adjacent normalized normal knots, with `sigma_Delta_n = 0.10`.
+   No absolute value (signs explicitly aligned).
+
+4. **Layer 2 boundary-direction floor**: `sigma_a2` now has a `0.02*R_X`
+   floor (previously had no floor; this was deviation #4 from the spec).
+
+5. **Phase reparameterization**: removed `phi0`, `g_knots`, and the
+   `phase_boundary` Potential entirely. Replaced with `q_knots ~ N(0, 0.20^2)`
+   (mean-zero prior), smoothness Potential, and a boundary-normalized positive
+   speed model. Phase satisfies `phi(tau_k) = 2*pi*k` exactly by construction.
+   Per-cycle cumulative weight matrices are precomputed as constant PyTensor
+   tensors. Phase velocity computed analytically from `2*pi*w / S_{k,total}`.
+
+6. **Normal mean resultant length diagnostic**: added `normal_raw_mean` and
+   `normal_resultant_length` to `_Layer2Summary` and `BayesianPhaseDiagnostics`.
+   `_compute_diagnostics` warns if `||E[n(t)|X]|| < 0.80` at any time point.
+
+**All pure-numpy / non-MCMC tests pass:**
+- `align_normal_signs` and `orthonormal_tangent_basis`: unit norm, tangent-plane
+  orthogonality, mutual orthogonality, edge cases — ALL PASS.
+- Boundary-normalized phase construction: phi(tau_k) = 2*pi*k exactly, monotone
+  with non-uniform speed, invariant to constant offset in q within a cycle — ALL PASS.
+- Frame construction (e1/e2/n): unchanged from previous validated version.
+
+**MCMC test status**: running (see running log). Previous worst-case was 84
+divergences / 999s / min cos_sim 0.51. Expected improvement: 0 divergences,
+min cos_sim > 0.95. Will update this section with actual results.
+
+**Handed off for reparameterization debugging (previous note, still relevant
+for context).** All of Layer 1, Layer 2, diagnostics, and the public API
+are implemented in `phase_coordinates/bayesian.py` (~1300 lines). Utility
+functions and Layer 1 are fully validated with passing standalone checks.
+Layer 2 is implemented and structurally correct, but had an unresolved NUTS
+sampling convergence problem (high divergence rate + localized normal artifact).
+See "Layer 2 findings" below for the full diagnosis and history. The
+reparameterization above targets both root causes identified in that analysis.
+
+**All raw diagnostic scripts and run logs behind those findings are committed
+under `docs/debug/` (see `docs/debug/README.md` for an index).**
 
 ## What's done
 
@@ -135,16 +178,24 @@ out (not being pursued right now):
 
 ## Environment
 
-- Default `python` on PATH (3.14) has **no** numpy/pandas/sklearn/scipy installed,
-  let alone pymc/arviz. It cannot even run the existing deterministic test suite.
-  Do not use it for anything in this task except the "no optional deps" import/
-  error-message tests, and even then, it would need to at least run
-  `phase_coordinates.bayesian` in isolation without importing the rest of the
-  package's numpy-dependent bits... in practice this project's real dev env is:
-- **`/c/Users/User/miniforge3/python.exe`** (Python 3.12.12, conda env) has numpy,
-  pandas, scikit-learn, scipy, pytest, pymc 5.28.0, arviz 0.23.0, numba 0.62.1
-  all installed. **Use this interpreter for everything** (tests, scratch scripts).
-  Package is editable-installed there (`pip install -e ".[dev]" --no-deps`).
+**Current (Linux, 2026-07-05):** A pixi environment has been set up at the
+repo root (`pixi.toml`). Run scripts with `pixi run python <script>` or
+activate with `pixi shell`. Has Python 3.12, PyMC 6.0.1, ArviZ 1.2.0,
+numba 0.65.1, numpy, scipy, scikit-learn, pandas, pytest all installed.
+The package is editable-installed via the `pypi-dependencies` table in
+`pixi.toml`. This replaces the Windows miniforge environment.
+
+**Note on PyMC 6 vs PyMC 5:** The original code was written for PyMC 5.28
+(`idata.posterior` returned an InferenceData). PyMC 6 returns an xarray
+DataTree, but `idata.posterior` still works as an attribute (it's a property
+returning the "posterior" child DataTree). All existing posterior access
+patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
+
+**Old environment (Windows, for historical reference):**
+- Default `python` on PATH (3.14) has **no** numpy/pandas/sklearn/scipy installed.
+  Do not use it.
+- **`/c/Users/User/miniforge3/python.exe`** (Python 3.12.12, conda env) had
+  pymc 5.28.0, arviz 0.23.0, numba 0.62.1. Now superseded by pixi environment.
 - No C++ compiler (`g++`) is available, so PyTensor falls back to pure-Python
   graph execution by default — very slow (a trivial 8-parameter/400-draw model
   took 35s). Fix: pass `compile_kwargs={"mode": "NUMBA"}` to `pm.sample()` when

@@ -1,5 +1,8 @@
 import sys, time
-sys.path.insert(0, r"D:\Repositories\phase-coordinates")
+import os
+# Support both Windows (original) and Linux paths
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+sys.path.insert(0, _repo_root)
 import numpy as np
 
 

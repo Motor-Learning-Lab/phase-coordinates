@@ -182,6 +182,50 @@ def normalize(v, axis=-1, eps=1e-12):
     return v / np.clip(norm, eps, None)
 
 
+def align_normal_signs(normals):
+    """
+    Flip signs of consecutive normals so adjacent pairs have positive dot
+    product. This removes the hemispheric sign ambiguity from Layer 1 normal
+    estimates before using them as reference directions in Layer 2.
+    """
+    normals = np.array(normals, dtype=float)
+    aligned = normals.copy()
+    for j in range(1, len(aligned)):
+        if np.dot(aligned[j], aligned[j - 1]) < 0:
+            aligned[j] = -aligned[j]
+    return aligned
+
+
+def orthonormal_tangent_basis(normals, eps=1e-12):
+    """
+    Return an orthonormal tangent basis ``Q`` with shape ``(n, 3, 2)`` such
+    that for each row ``j``:
+
+    - ``Q[j].T @ Q[j] == I_2``
+    - ``Q[j].T @ normals[j] == 0`` (columns lie in tangent plane of normal j)
+
+    Construction: for each normal, choose the coordinate axis least aligned
+    with it, project that axis into the tangent plane, normalise to get ``t1``,
+    then take the cross product with the normal for ``t2``.
+    """
+    normals = normalize(np.asarray(normals, dtype=float))
+    n_knots = len(normals)
+    Q = np.zeros((n_knots, 3, 2))
+    for j in range(n_knots):
+        m = normals[j]
+        # Choose the coordinate axis most perpendicular to m
+        i_min = int(np.argmin(np.abs(m)))
+        ref = np.zeros(3)
+        ref[i_min] = 1.0
+        t1 = ref - np.dot(ref, m) * m
+        t1 = t1 / max(np.linalg.norm(t1), eps)
+        t2 = np.cross(m, t1)
+        t2 = t2 / max(np.linalg.norm(t2), eps)
+        Q[j, :, 0] = t1
+        Q[j, :, 1] = t2
+    return Q
+
+
 def construct_frame(n, a, eps=1e-12):
     """
     Build the boundary-anchored in-plane frame ``(e1, e2)`` from unit normal(s)
@@ -318,6 +362,7 @@ class BayesianPhaseDiagnostics:
     rho_tau: float                    # sqrt(tr(Sigma_tau)) / R_X
     projection_ratio: np.ndarray      # p_t / ||a(t)|| per time sample
     normal_prior_dominated: list      # cycle indices flagged
+    normal_resultant_length: np.ndarray  # ||E[n(t)|X]|| (n_time,); low values flag misleading means
     rho_z_median: float
     center_drift_ratio: float         # D_c / R_X
     omega_ratio: float                # omega_95 / omega_5
@@ -381,7 +426,9 @@ _OBS_NOISE_LOGNORMAL_SD = 0.5
 
 _PHASE_VELOCITY_LOGKNOT_SD = 0.20
 _PHASE_VELOCITY_SMOOTHNESS_SD = 0.15
-_PHASE_BOUNDARY_SD = 0.15
+_PHASE_BOUNDARY_SD = 0.15                 # kept for reference; no longer used in Layer 2
+_LAYER2_BOUNDARY_DIR_FLOOR_FRAC = 0.02   # * R_X, floor for sigma_a2 (spec §"Floor for sigma_a2")
+_LAYER2_NORMAL2_SMOOTHNESS_SD = 0.10     # sigma_Delta_n in spec §"Layer 2 normal smoothness"
 
 
 @dataclass
@@ -608,7 +655,9 @@ class _Layer2Summary:
     phase_velocity_sd: np.ndarray
     center_mean: np.ndarray
     center_sd: np.ndarray
-    normal_mean: np.ndarray
+    normal_mean: np.ndarray           # normalized posterior mean direction (n_time, 3)
+    normal_raw_mean: np.ndarray       # unnormalized posterior mean (n_time, 3) for resultant length
+    normal_resultant_length: np.ndarray  # ||E[n(t)|X]|| (n_time,), < 1 flags bimodal normal
     normal_angular_sd: np.ndarray
     e1_mean: np.ndarray
     e2_mean: np.ndarray
@@ -642,18 +691,21 @@ def _fit_layer2(
     Layer 1 posterior summaries as priors for smoothly varying phase, center,
     normal, radius, and perpendicular deviation.
 
-    Deviation from the literal spec: the cubic-spline knot *locations* for
-    c(t), u(t)/n(t), a(t) are fixed at the Layer 1 posterior-mean boundary
-    times (rather than re-drawn as Layer 2 free parameters). This keeps the
-    splines linear in their (still-random, 1.5x-padded-prior) knot *values*,
-    so spline evaluation is a plain, fully differentiable matrix multiply.
-    Re-deriving a natural cubic spline's coefficients for randomly-varying
-    knot locations at every NUTS step would require a differentiable
-    tridiagonal solve inside the model graph -- substantially more complex
-    with no evidence the spec's tau_k floors (already tiny relative to a
-    cycle) need re-propagating on top of the fixed-location splines. Layer 1
-    boundary-time uncertainty is still reported; it is just not re-injected
-    into the Layer 2 spline geometry.
+    Reparameterization (vs. original implementation):
+
+    1. Normal: tangent-plane deviations (delta_n) around Layer 1 posterior
+       mean normals, not raw unconstrained 3D vector spline (u2).  Prevents
+       the near-zero spline interpolant that produced localized normal artifacts.
+
+    2. Phase: boundary-normalized positive speed -- phi(t) satisfies
+       phi(tau_k) = 2*pi*k exactly by construction.  Removes the tight
+       phase_boundary soft-Potential that was causing divergences.
+
+    3. sigma_a2 now has a floor of 0.02*R_X (previously had no floor).
+
+    Fixed deviation from literal spec: spline knot *locations* are fixed at
+    tau_mean rather than being re-drawn Layer 2 free parameters, keeping the
+    spline linear in its knot values (a plain matrix multiply inside PyMC).
     """
     pm = _import_pymc()
     pt = _import_pytensor_tensor()
@@ -671,19 +723,31 @@ def _fit_layer2(
     X_fit = X[i0 : i1 + 1]
     t_fit = np.arange(i0, i1 + 1) / fs
     n_time = X_fit.shape[0]
+    dt = 1.0 / fs
 
     def pad(v):
         return np.vstack([v, v[-1:]])
 
-    c_mean_p, c_sd_p = pad(layer1.center_mean), pad(layer1.center_sd)
-    u_mean_p, u_sd_p = pad(layer1.u_mean), pad(layer1.u_sd)
-    a_mean_p, a_sd_p = pad(layer1.boundary_direction_mean), pad(layer1.boundary_direction_sd)
+    c_mean_p = pad(layer1.center_mean)
+    c_sd_p = pad(layer1.center_sd)
+    a_mean_p = pad(layer1.boundary_direction_mean)
+    a_sd_p = pad(layer1.boundary_direction_sd)
 
     sigma_c2 = np.maximum(_LAYER2_PADDING * c_sd_p, _LAYER2_CENTER_FLOOR_FRAC * R_X)
-    sigma_u2 = np.maximum(_LAYER2_PADDING * u_sd_p, _LAYER2_NORMAL_FLOOR)
-    sigma_a2 = _LAYER2_PADDING * np.maximum(a_sd_p, 1e-6)
+    # Floor added for boundary-direction SD (deviation #4 resolved)
+    sigma_a2 = np.maximum(_LAYER2_PADDING * a_sd_p, _LAYER2_BOUNDARY_DIR_FLOOR_FRAC * R_X)
 
-    B = cubic_spline_matrix(tau_mean, t_fit)
+    # --- Sign-aligned Layer 1 normals and tangent bases for Layer 2 ---
+    # Pad angular SD from (K-1,) to (K,) then apply 1.5x padding + floor
+    n_angular_sd_raw = layer1.normal_angular_sd                        # (K-1,)
+    n_angular_sd_p = np.append(n_angular_sd_raw, n_angular_sd_raw[-1])  # (K,)
+    sigma_theta2 = np.maximum(_LAYER2_PADDING * n_angular_sd_p, _LAYER2_NORMAL_FLOOR)  # (K,)
+    n_mean_p = normalize(pad(layer1.normal_mean))  # (K, 3) padded, re-normalised
+    m_p = align_normal_signs(n_mean_p)             # (K, 3) sign-aligned adjacent pairs
+    Q_p = orthonormal_tangent_basis(m_p)           # (K, 3, 2)
+
+    # --- Spline matrices ---
+    B = cubic_spline_matrix(tau_mean, t_fit)  # (n_time, K) from boundary knots to t_fit
     B_const = pt.constant(B)
 
     if n_velocity_knots is None:
@@ -692,59 +756,96 @@ def _fit_layer2(
     Bg = cubic_spline_matrix(vel_knot_t, t_fit)
     Bg_const = pt.constant(Bg)
 
-    Btau = _linear_interp_matrix(t_fit, tau_mean)
-    Btau_const = pt.constant(Btau)
+    # --- Per-cycle membership masks for boundary-normalized phase ---
+    # cycle_idx_arr[i] = k  iff  tau_mean[k] <= t_fit[i] < tau_mean[k+1]
+    cycle_idx_arr = np.searchsorted(tau_mean, t_fit, side="right") - 1
+    cycle_idx_arr = np.clip(cycle_idx_arr, 0, K - 2)
+    cycle_phase_offset = (2 * np.pi * cycle_idx_arr).astype(float)    # (n_time,)
+    # cumul_mask[i, j] = 1 iff j is in same cycle as i AND j < i
+    same_cycle_mat = (cycle_idx_arr[:, None] == cycle_idx_arr[None, :]).astype(float)
+    before_i_mat = (np.arange(n_time)[:, None] > np.arange(n_time)[None, :]).astype(float)
+    cumul_mask = same_cycle_mat * before_i_mat                         # (n_time, n_time)
 
-    omega0 = 2 * np.pi / T0
+    # PyTensor constants
+    Q_const = pt.constant(Q_p)
+    m_const = pt.constant(m_p)
+    cumul_mask_const = pt.constant(cumul_mask)
+    same_cycle_const = pt.constant(same_cycle_mat)
+    cycle_phase_offset_const = pt.constant(cycle_phase_offset)
+
     r0_hat = float(np.median(np.linalg.norm(layer1.boundary_direction_mean, axis=-1)))
     r0_hat = max(r0_hat, 1e-3 * R_X)
-    dt = 1.0 / fs
-    k_arr = np.arange(K, dtype=float)
 
     with pm.Model():
+        # --- Center ---
         c2 = pm.Normal("c2", mu=c_mean_p, sigma=sigma_c2, shape=c_mean_p.shape)
-        u2 = pm.Normal("u2", mu=u_mean_p, sigma=sigma_u2, shape=u_mean_p.shape)
-        a2 = pm.Normal("a2", mu=a_mean_p, sigma=sigma_a2, shape=a_mean_p.shape)
-
         c_t = pm.Deterministic("center", pt.dot(B_const, c2))
-        u_t = pt.dot(B_const, u2)
-        n_t = pm.Deterministic(
-            "normal", u_t / pt.sqrt(pt.sum(u_t**2, axis=-1, keepdims=True) + 1e-12)
+
+        # --- Normal: tangent-plane deviations ---
+        # delta_n[j] ~ N(0, sigma_theta2[j]^2 * I_2); both components same sigma
+        delta_n = pm.Normal(
+            "delta_n", mu=0.0, sigma=sigma_theta2[:, None], shape=(K, 2)
         )
+        # Tang displacement: sum_d Q_p[j, :, d] * delta_n[j, d]  -> (K, 3)
+        tang_disp = pt.sum(Q_const * delta_n[:, None, :], axis=-1)
+        n_tilde = m_const + tang_disp                                  # (K, 3)
+        n_tilde_norm = pt.sqrt(pt.sum(n_tilde**2, axis=-1, keepdims=True) + 1e-12)
+        n_knots_pt = n_tilde / n_tilde_norm                            # (K, 3) normalised knots
+
+        # Smoothness across adjacent normal knots (no absolute value; signs aligned)
+        if K > 1:
+            cos_adj = pt.sum(n_knots_pt[1:] * n_knots_pt[:-1], axis=-1)
+            pm.Potential(
+                "normal2_smoothness",
+                (-(1.0 - cos_adj) / _LAYER2_NORMAL2_SMOOTHNESS_SD**2).sum(),
+            )
+
+        # Spline knots through time, renormalise
+        n_bar_t = pt.dot(B_const, n_knots_pt)                         # (n_time, 3)
+        n_bar_norm = pt.sqrt(pt.sum(n_bar_t**2, axis=-1, keepdims=True) + 1e-12)
+        n_t = pm.Deterministic("normal", n_bar_t / n_bar_norm)
+
+        # --- Boundary direction ---
+        a2 = pm.Normal("a2", mu=a_mean_p, sigma=sigma_a2, shape=a_mean_p.shape)
         a_t = pm.Deterministic("a", pt.dot(B_const, a2))
 
+        # Boundary-anchored in-plane frame
         proj = a_t - n_t * pt.sum(n_t * a_t, axis=-1, keepdims=True)
         proj_norm = pt.sqrt(pt.sum(proj**2, axis=-1, keepdims=True) + 1e-12)
         e1_t = pm.Deterministic("e1", proj / proj_norm)
         e2_t = pm.Deterministic("e2", _pt_cross(n_t, e1_t, pt))
         pm.Deterministic("projection_norm", proj_norm[:, 0])
 
-        g_knots = pm.Normal(
-            "g_knots", mu=np.log(omega0), sigma=_PHASE_VELOCITY_LOGKNOT_SD, shape=n_velocity_knots
+        # --- Phase: boundary-normalized positive speed ---
+        # q(t) spline; prior centred at 0 because per-cycle normalisation
+        # removes the absolute scale of exp(q).
+        q_knots = pm.Normal(
+            "q_knots", mu=0.0, sigma=_PHASE_VELOCITY_LOGKNOT_SD, shape=n_velocity_knots
         )
         if n_velocity_knots > 1:
-            dg = g_knots[1:] - g_knots[:-1]
+            dq = q_knots[1:] - q_knots[:-1]
             pm.Potential(
                 "velocity_smoothness",
-                pm.logp(pm.Normal.dist(0.0, _PHASE_VELOCITY_SMOOTHNESS_SD), dg).sum(),
+                pm.logp(pm.Normal.dist(0.0, _PHASE_VELOCITY_SMOOTHNESS_SD), dq).sum(),
             )
-        omega_t = pm.Deterministic("phase_velocity", pt.exp(pt.dot(Bg_const, g_knots)))
+        q_t = pt.dot(Bg_const, q_knots)     # (n_time,) log speed
+        w_t = pt.exp(q_t)                   # (n_time,) unnormalised speed > 0
 
-        phi0 = pm.Normal("phi0", mu=0.0, sigma=2 * np.pi)
-        dphi = omega_t * dt
-        cum = pt.cumsum(dphi)
+        # S_{k,i} = sum_{j in k, j<i} w_j * dt  (cumulative, not including i)
+        # S_{k,total} = sum_{j in k} w_j * dt
+        S_ki = pt.dot(cumul_mask_const, w_t) * dt         # (n_time,)
+        S_k_total = pt.dot(same_cycle_const, w_t) * dt    # (n_time,)
         phi_t = pm.Deterministic(
-            "phase", phi0 + pt.concatenate([pt.zeros(1), cum[:-1]])
+            "phase",
+            cycle_phase_offset_const + 2 * np.pi * S_ki / (S_k_total + 1e-12),
+        )
+        # Instantaneous phase velocity: d phi/dt = 2*pi * w_i / S_{k,total}
+        pm.Deterministic(
+            "phase_velocity",
+            2 * np.pi * w_t / (S_k_total + 1e-12),
         )
 
-        phi_at_tau = pt.dot(Btau_const, phi_t)
-        pm.Potential(
-            "phase_boundary",
-            pm.logp(
-                pm.Normal.dist(mu=2 * np.pi * k_arr, sigma=_PHASE_BOUNDARY_SD), phi_at_tau
-            ).sum(),
-        )
-
+        # --- Radius ---
         h_r_knots = pm.Normal(
             "h_r_knots", mu=np.log(r0_hat), sigma=0.3, shape=n_velocity_knots
         )
@@ -756,6 +857,7 @@ def _fit_layer2(
             )
         r_t = pm.Deterministic("radius", pt.exp(pt.dot(Bg_const, h_r_knots)))
 
+        # --- Perpendicular deviation ---
         h_z_knots = pm.Normal("h_z_knots", mu=0.0, sigma=0.2 * R_X, shape=n_velocity_knots)
         if n_velocity_knots > 1:
             dhz = h_z_knots[1:] - h_z_knots[:-1]
@@ -767,6 +869,7 @@ def _fit_layer2(
             )
         z_t = pm.Deterministic("perp_deviation", pt.dot(Bg_const, h_z_knots))
 
+        # --- Observation model ---
         pred = (
             c_t
             + e1_t * (r_t * pt.cos(phi_t))[:, None]
@@ -781,10 +884,9 @@ def _fit_layer2(
 
         initvals = {
             "c2": c_mean_p,
-            "u2": u_mean_p,
+            "delta_n": np.zeros((K, 2)),
             "a2": a_mean_p,
-            "g_knots": np.full(n_velocity_knots, np.log(omega0)),
-            "phi0": 0.0,
+            "q_knots": np.zeros(n_velocity_knots),
             "h_r_knots": np.full(n_velocity_knots, np.log(r0_hat)),
             "h_z_knots": np.zeros(n_velocity_knots),
             "rho_x": 0.03,
@@ -805,19 +907,21 @@ def _fit_layer2(
 
     phase_mean = pmean("phase")
     phase_sd = psd("phase")
-    normal_mean = normalize(pmean("normal"))
+
+    # Compute raw (unnormalized) mean for resultant-length diagnostic
+    normal_raw_mean = post["normal"].mean(("chain", "draw")).values  # (n_time, 3)
+    normal_resultant_length = np.linalg.norm(normal_raw_mean, axis=-1)  # (n_time,)
+    normal_mean = normalize(normal_raw_mean)
+
     normal_samples = post["normal"].values.reshape(-1, n_time, 3)
     cos_to_mean = np.clip(
         np.einsum("dtj,tj->dt", normal_samples, normal_mean), -1.0, 1.0
     )
     normal_angular_sd = np.std(np.arccos(np.abs(cos_to_mean)), axis=0)
 
-    # Reconstruct e1/e2 from the posterior-mean n and a (rather than
-    # averaging already-orthogonal per-draw e1/e2 samples) so the reported
-    # point-estimate frame is itself exactly orthonormal: the elementwise
-    # mean of many per-draw orthonormal frames is not generally orthonormal.
-    a_mean = pmean("a")
-    e1_mean, e2_mean, projection_norm_mean = construct_frame(normal_mean, a_mean)
+    # Reconstruct e1/e2 from posterior-mean n and a so the frame is exactly orthonormal
+    a_mean_fit = pmean("a")
+    e1_mean, e2_mean, projection_norm_mean = construct_frame(normal_mean, a_mean_fit)
 
     return _Layer2Summary(
         time=t_fit,
@@ -828,10 +932,12 @@ def _fit_layer2(
         center_mean=pmean("center"),
         center_sd=psd("center"),
         normal_mean=normal_mean,
+        normal_raw_mean=normal_raw_mean,
+        normal_resultant_length=normal_resultant_length,
         normal_angular_sd=normal_angular_sd,
         e1_mean=e1_mean,
         e2_mean=e2_mean,
-        boundary_direction_mean=a_mean,
+        boundary_direction_mean=a_mean_fit,
         projection_norm_mean=projection_norm_mean,
         radius_mean=pmean("radius"),
         radius_sd=psd("radius"),
@@ -975,6 +1081,20 @@ def _compute_diagnostics(layer1, layer2, R_X):
     elif sigma_x_over_RX > 0.10:
         warns.append(f"Observation noise elevated: sigma_x/R_X = {sigma_x_over_RX:.3f} > 0.10.")
 
+    # Low normal mean-resultant-length diagnostic: warns when normalising the
+    # posterior mean direction is misleading (spec: "Low normal mean resultant
+    # length").  This can catch cases where most individual draws agree on a
+    # stable-but-wrong direction without the posterior SD being elevated.
+    normal_resultant_length = layer2.normal_resultant_length
+    low_rl_mask = normal_resultant_length < 0.80
+    low_rl_frac = float(np.mean(low_rl_mask))
+    low_rl_min = float(np.min(normal_resultant_length))
+    if low_rl_frac > 0:
+        warns.append(
+            f"Normal mean resultant length < 0.80 at {100 * low_rl_frac:.1f}% of time samples "
+            f"(min {low_rl_min:.3f}). Normalised mean direction may be misleading at those points."
+        )
+
     dphi = np.diff(layer2.phase_mean)
     phase_monotonic = bool(np.all(dphi >= -1e-6))
     if not phase_monotonic:
@@ -987,6 +1107,7 @@ def _compute_diagnostics(layer1, layer2, R_X):
         rho_tau=rho_tau,
         projection_ratio=projection_ratio,
         normal_prior_dominated=normal_prior_dominated,
+        normal_resultant_length=normal_resultant_length,
         rho_z_median=rho_z_median,
         center_drift_ratio=center_drift_ratio,
         omega_ratio=omega_ratio,
