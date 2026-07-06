@@ -202,7 +202,9 @@ The old branch remains available for that history.
 - [x] Run fixed-plane synthetic test (log 13) — see finding 1 below.
 - [x] Per-chain analysis of sigma_x and R_k posteriors — see finding 2.
 - [x] Implemented oriented two-anchor frame (e1 from a0, e2 from a90, n = cross(e1,e2)) — see finding 3.
-- [ ] Investigate remaining sigma_x inflation (2.6×) and z_rms elevation from short last cycle.
+- [x] Architectural refactoring: removed PCA-normal pathway; Layer 1 samples only tau/c; Layer 2 uses deterministic anchors from c_k — see finding 4.
+- [x] Added `docs/debug/scripts/test_cycle_fixed_synthetic_suite.py`; two synthetic scenarios (log 16) — see finding 5.
+- [ ] Investigate remaining sigma_x inflation (2.2× on clean data, 4.5× with phase warp).
 - [ ] Decide whether to expose the new model through public API.
 
 ## Findings
@@ -398,3 +400,59 @@ sigma_a90     : [0.025, 0.145, 0.114]  (large y/z: a90 varies in the tilt plane)
 **Next:** Investigate the residual sigma_x inflation. Likely causes: (a) short
 last-cycle boundary artifact inflating the global sigma_x; (b) sigma_x absorbing
 within-cycle variability not captured by linear phase.
+
+### Finding 4: Architectural refactoring — native two-anchor frame (2026-07-06, log 15)
+
+Removed the PCA-normal pathway entirely from both Layer 1 and Layer 2.
+
+**Layer 1 changes:**
+- Now samples only `tau` (cycle boundaries) and `c` (cycle centers). The `u`/`n` Bayesian variables, `normal_smoothness` potential, and all PCA-normal helper functions are removed.
+- After sampling, computes the oriented frame from real-valued data interpolation at `tau_mean[:-1]` (phase-zero) and `tau_mean[:-1] + 0.25*T_k` (quarter-phase).
+
+**Layer 2 changes:**
+- Removes the independent Bayesian variables `a0_k`, `a90_k`, `sigma_a0`, `sigma_a90`.
+- Uses `x0_const = pt.constant(x0_arr)` and `x90_const = pt.constant(x90_arr)` as fixed PyTensor constants.
+- Frame construction is deterministic inside the model: `a0_k = x0_const - c_k`, `a90_k = x90_const - c_k`. These move with the sampled center without adding parameters.
+- The sampled parameter set is now: `sigma_c, c_k, sigma_log_R, log_R_k, h_z_knots, rho_x`.
+
+**Results (log 15, tune=400, draws=400, chains=2, seed=0):**
+```
+Divergences  : 0  (was 3 in log 14)
+Max treedepth: 0  (was 24 in log 14)
+Sampling time: 8s (was 20s — 2.5× speedup from removing anchor variables)
+sigma_x mean : 0.065  (factor 3.2×; was 2.6× in log 14 — slightly worse for cycle-5 data)
+R_k median   : 0.9991  (correct)
+signed cos_sim: min=0.9993  (all positive)
+orient scores: all 1.0
+RMSE total   : 0.0394
+z_rms        : 0.014
+ALL CHECKS PASSED
+```
+
+**Cycle 5 artifact still present:** R_k = 0.719 and center norm = 0.596 for the short last cycle (60 samples). This inflates the global sigma_x. Cycles 0–4 are well-identified.
+
+**Sigma_log_R** stays near 0.08 (prior scale 0.03 — pulled 2.6× by cycle 5).
+
+### Finding 5: Synthetic suite — clean cycles and mild phase warp (2026-07-06, log 16)
+
+Two synthetic scenarios were run using `test_cycle_fixed_synthetic_suite.py`.
+
+**Scenario 1: Clean complete cycles (seed=1, 6 cycles of 100 samples each)**
+- No partial boundary artifact (data starts at tau_0=0, ends at tau_6=600).
+- Results: 20 divergences, sigma_x=0.045 (factor 2.2×). R_k all ~1.0. ALL CHECKS PASSED.
+- Conclusion: The partial last-cycle artifact from the original test is not the only source of sigma_x inflation. Even with complete clean cycles, sigma_x remains at 2.2× the true noise. Linear-phase assumption leaves systematic within-cycle residuals that inflate sigma_x.
+
+**Scenario 2: Mild phase warp (alpha=0.3, seed=2, 5 cycles)**
+- True phase `phi(t) = 2*pi*t + 0.3*sin(2*pi*t)` creates non-uniform speed within cycles.
+- Results: 8 divergences, sigma_x=0.090 (factor 4.5×). R_k slightly deflated (~0.97). Elevated cyclic/tang RMSE (0.108/0.109). Normal RMSE near noise (0.023). ALL CHECKS PASSED.
+- Conclusion: The model correctly localizes the warp to cyclic/tangential residuals. The normal geometry is unaffected. The sigma_x inflation from phase warp is substantial — linear phase is a significant assumption when within-cycle speed is non-uniform.
+
+**Summary of sigma_x inflation sources identified:**
+
+```text
+Original test (partial last cycle): 2.6× → 3.2× after refactoring
+Clean complete cycles             : 2.2× (intrinsic to linear-phase model)
+Mild phase warp (alpha=0.3)       : 4.5× (warp absorbed by sigma_x)
+```
+
+The model correctly identifies geometry and plane in all cases. The remaining sigma_x inflation is a model limitation (linear phase assumption) rather than a sampler or identifiability failure.

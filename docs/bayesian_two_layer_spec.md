@@ -12,20 +12,33 @@ bayesian-cycle-fixed-geometry
 
 ## Model summary
 
-Layer 1 remains a coarse cycle model. It provides posterior summaries for cycle boundaries and cycle-level geometry.
+Layer 1 remains a coarse cycle model. It samples cycle boundaries `tau` and cycle centers `c`. After sampling, it derives an oriented frame per cycle from real-valued data interpolation at the phase-zero and quarter-phase anchor times.
 
-Layer 2 is now a cycle-fixed geometry model.
+Layer 2 is a cycle-fixed geometry model. PCA normals are not part of the active model. Normals are derived as `n = cross(e1, e2)` from the oriented two-anchor frame.
 
-For each cycle `k`, estimate cycle-level geometric variables:
+For each cycle `k`, the Bayesian cycle-level variables are:
 
 ```text
 c_k      cycle center
-n_k      cycle plane normal
 R_k      cycle mean radius
-a_k      cycle origin / phase-zero direction
 ```
 
-For each time point `t` inside cycle `k`, estimate instantaneous movement variables:
+The in-plane frame and normal are derived deterministically from the sampled center and fixed anchor points interpolated at the Layer 1 posterior mean boundaries:
+
+```text
+x0_k   = interp_X(tau_k)              # real-valued interpolation
+x90_k  = interp_X(tau_k + 0.25*T_k)  # quarter-period anchor
+
+a0_k   = x0_const  - c_k             # moves with sampled center
+a90_k  = x90_const - c_k             # moves with sampled center
+
+e1_k   = normalize(a0_k)
+a90_orth_k = a90_k - e1_k * dot(a90_k, e1_k)
+e2_k   = normalize(a90_orth_k)
+n_k    = normalize(cross(e1_k, e2_k))
+```
+
+For each time point `t` inside cycle `k`, the instantaneous variables are:
 
 ```text
 phi_t    phase
@@ -43,13 +56,6 @@ pred[t] =
     + n_k  * z_t
 
 X[t] ~ Normal(pred[t], sigma_x)
-```
-
-where:
-
-```text
-e1_k = normalized projection of a_k into the plane orthogonal to n_k
-e2_k = cross(n_k, e1_k)
 ```
 
 The defining restriction of this branch is:
@@ -84,17 +90,31 @@ The cycle-fixed model removes that confound by making `c_k`, `n_k`, `R_k`, and `
 
 ## Layer 1 handoff
 
-Layer 1 should provide, at minimum:
+Layer 1 samples only `tau` (cycle boundaries) and `c` (cycle centers). It does not sample normal vectors or orientation vectors.
+
+After sampling, Layer 1 computes the oriented frame by real-valued interpolation:
+
+```text
+x0_arr  = interp_X(tau_mean[:-1])                     # phase-zero data points
+x90_arr = interp_X(tau_mean[:-1] + 0.25*T_k)          # quarter-phase data points
+a0_mean = x0_arr - c_mean                              # phase-zero anchor vectors
+a90_mean = x90_arr - c_mean                            # quarter-phase anchor vectors
+e1_mean, e2_mean, normal_mean = gram_schmidt(a0_mean, a90_mean)
+```
+
+Layer 1 provides to Layer 2:
 
 ```text
 tau_mean[k]                 posterior mean cycle boundary
 c1_mean[k, 3]               cycle center posterior mean
-n1_mean[k, 3]               cycle normal posterior mean, sign-aligned
-boundary direction estimate  a1_mean[k, 3]
-optional posterior SDs       c1_sd, n angular sd, a1_sd
+c1_sd[k, 3]                 cycle center posterior SD
+x0_arr[k, 3]                data interpolated at tau_mean[k]  (fixed constant)
+x90_arr[k, 3]               data interpolated at tau_mean[k] + 0.25*T_k  (fixed constant)
 ```
 
-Layer 1 means set Layer 2 prior means. Layer 2 hierarchical scale parameters control how far cycle-level variables may move away from those Layer 1 means.
+Layer 1 normal vectors are diagnostic outputs, not Bayesian parameters. They are derived after sampling and passed as orientation seeds for reporting, but they do not enter the Layer 2 likelihood.
+
+Layer 2 hierarchical scale parameters control how far `c_k` may move from `c1_mean[k]`. The frame adjusts to match because `a0_k = x0_const - c_k` and `a90_k = x90_const - c_k` both depend on `c_k`.
 
 ## Hierarchical priors for cycle-level fixed variables
 
@@ -172,36 +192,24 @@ r_t = R_k
 
 or a low-flexibility, zero-centered within-cycle deviation `h_r_t`.
 
-### Normal hierarchy
+### Normal and frame (derived, not sampled)
 
-Normals must remain unit vectors.
+Normals are derived from the two-anchor frame construction. They are not independently sampled Bayesian variables.
 
-Use tangent-plane deviations around the Layer 1 normal:
-
-```text
-Q_k = orthonormal tangent basis at n1_mean[k]
-delta_n[k] in R^2
-n_k = normalize(n1_mean[k] + Q_k @ delta_n[k])
-```
-
-Compute empirical angular variability from Layer 1 normal means. For example:
+After sampling `c_k`, compute:
 
 ```text
-angle_sd = sd of adjacent-cycle angles between n1_mean[k] and n1_mean[k+1]
+a0_k   = x0_const  - c_k
+a90_k  = x90_const - c_k
+
+e1_k          = normalize(a0_k)
+dot_a90_e1    = dot(a90_k, e1_k)
+a90_orth_k    = a90_k - e1_k * dot_a90_e1
+e2_k          = normalize(a90_orth_k)
+n_k           = normalize(cross(e1_k, e2_k))
 ```
 
-Then:
-
-```text
-sigma_n_angle ~ HalfNormal(scale = max(angle_sd, normal_angle_floor))
-delta_n[k, d] ~ Normal(0, sigma_n_angle)
-```
-
-Suggested floor:
-
-```text
-normal_angle_floor = 0.03 rad
-```
+The signed normal is always consistent with the data ordering because `x0_const` and `x90_const` are both anchored to the observed trajectory. There is no sign ambiguity.
 
 The normal is fixed within cycle:
 
@@ -209,43 +217,7 @@ The normal is fixed within cycle:
 n(t) = n_k for tau_k <= t < tau_{k+1}
 ```
 
-### Cycle origin / phase-zero direction hierarchy
-
-The cycle origin `a_k` defines the in-plane phase-zero direction. It should represent the vector from the cycle center to the boundary / phase-zero point.
-
-Recommended prior mean:
-
-```text
-a1_mean[k] = X(tau_k) - c1_mean[k]
-```
-
-or an equivalent Layer 1 boundary-origin estimate that is explicitly tied to phase zero.
-
-Start with a vector hierarchy:
-
-```text
-empirical_sd_a[d] = sd across k of a1_mean[k, d]
-sigma_a[d] ~ HalfNormal(scale = max(empirical_sd_a[d], a_floor))
-a_k[d] ~ Normal(a1_mean[k, d], sigma_a[d])
-```
-
-Suggested floor:
-
-```text
-a_floor = 0.02 * R_X
-```
-
-Then construct the in-plane basis:
-
-```text
-proj_a_k = a_k - n_k * dot(n_k, a_k)
-e1_k = proj_a_k / norm(proj_a_k)
-e2_k = cross(n_k, e1_k)
-```
-
-Add a diagnostic warning or failure when `norm(proj_a_k) / norm(a_k)` is too small.
-
-A later alternative is an in-plane angular hierarchy around the Layer 1 origin direction, but do not start there unless the vector hierarchy fails.
+There are no `sigma_n_angle`, `delta_n`, or independent anchor variables in the Bayesian model. Add a diagnostic warning when `norm(a90_orth_k) / norm(a90_k)` is too small (indicates near-degenerate frame).
 
 ## Instantaneous variables
 
@@ -302,31 +274,27 @@ If the cycle-fixed model still inflates `sigma_x`, inspect center, radius, z, ph
 
 ## Implementation targets
 
-Add a new model path rather than overwriting the old one.
+The cycle-fixed model is implemented in `phase_coordinates/bayesian.py` as the internal function `_fit_layer2`.
 
-Suggested internal function:
-
-```text
-_fit_layer2_cycle_fixed_geometry(...)
-```
-
-Suggested public option later:
+The sampled parameters are:
 
 ```text
-fit_bayesian_phase_coordinates(..., layer2_geometry="cycle_fixed")
+Layer 1: tau, c, mu_tau, rho_tau
+Layer 2: sigma_c, c_k, sigma_log_R, log_R_k, h_z_knots, rho_x
 ```
 
-It is acceptable to begin with an internal function and a debug script before wiring the public API.
+All frame variables (`e1_k`, `e2_k`, `n_k`) are `pm.Deterministic` quantities derived from `c_k` and fixed constants.
 
-## Required debug script
+The public API wrapper is `fit_bayesian_phase_coordinates`.
 
-Create:
+## Debug scripts
 
 ```text
 docs/debug/scripts/test_layer2_cycle_fixed.py
+docs/debug/scripts/test_cycle_fixed_synthetic_suite.py
 ```
 
-Use the same fixed-plane synthetic data as `test_layer2.py`.
+The first script uses the same fixed-plane synthetic data as `test_layer2.py`. The suite script adds clean complete cycles and mild phase warp scenarios.
 
 Report:
 
@@ -336,7 +304,8 @@ max treedepth count
 sigma_x mean/median/5%/95%
 R_k mean/median by cycle
 center norm by cycle
-normal cos_sim by cycle
+normal cos_sim by cycle (signed and absolute)
+orientation scores (e2 alignment with quarter-phase anchor)
 z_rms
 RMSE total
 RMSE normal
@@ -344,7 +313,7 @@ RMSE cyclic
 RMSE tangential
 phase monotonicity
 frame orthonormality
-hierarchical scales: sigma_c, sigma_log_R, sigma_n_angle, sigma_a
+hierarchical scales: sigma_c, sigma_log_R
 ```
 
 ## Success criteria on fixed-plane synthetic data

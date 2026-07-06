@@ -1,0 +1,116 @@
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 3 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [sigma_c, c_k, sigma_log_R, log_R_k, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 6 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+tau_idx [ 36 134 233 333 435 535 595]
+Layer 1 took 4.0s
+
+Layer 1 oriented frame diagnostics (at posterior means):
+   cyc   dot(e1,e2)    |e1|    |e2|     |n|  signed_n_cos   abs_n_cos  orient_score   a90_orth|
+     0       0.0000  1.0000  1.0000  1.0000        0.9996      0.9996        1.0000      0.9815
+     1      -0.0000  1.0000  1.0000  1.0000        1.0000      1.0000        0.9996      0.9802
+     2       0.0000  1.0000  1.0000  1.0000        0.9992      0.9992        1.0000      0.9584
+     3       0.0000  1.0000  1.0000  1.0000        0.9989      0.9989        0.9999      0.9585
+     4       0.0000  1.0000  1.0000  1.0000        0.9998      0.9998        0.9998      0.9141
+     5      -0.0000  1.0000  1.0000  1.0000        1.0000      1.0000        0.9254      0.8611
+
+Pre-sampling oriented frame (Layer 2 prior means):
+   cyc   dot(e1,e2)    |e1|    |e2|     |n|  orient_score   a90_orth_norm
+     0       0.0000  1.0000  1.0000  1.0000        1.0000          0.9815
+     1      -0.0000  1.0000  1.0000  1.0000        0.9996          0.9802
+     2       0.0000  1.0000  1.0000  1.0000        1.0000          0.9584
+     3       0.0000  1.0000  1.0000  1.0000        0.9999          0.9585
+     4       0.0000  1.0000  1.0000  1.0000        0.9998          0.9141
+     5      -0.0000  1.0000  1.0000  1.0000        0.9254          0.8611
+
+Layer 2 took 8.4s
+
+======================================================================
+LAYER 2 CYCLE-FIXED GEOMETRY DIAGNOSTICS
+======================================================================
+True normal  : [ 0.        -0.5        0.8660254]
+True radius  : 1.0
+True sigma_x : 0.02
+R_X = 1.0017   T0 = 1.0000s   K_cyc = 6
+
+Divergences  : 0  ([0, 0] per chain)
+Max treedepth: 0  ([0, 0] per chain)
+
+sigma_x  mean=0.0649  median=0.0649  5%=0.0629  95%=0.0669  [true=0.02]
+
+R_k by cycle  [true=1.0]:
+  cycle 0: mean=1.0020  sd=0.0071
+  cycle 1: mean=0.9998  sd=0.0064
+  cycle 2: mean=0.9985  sd=0.0067
+  cycle 3: mean=1.0004  sd=0.0065
+  cycle 4: mean=0.9918  sd=0.0066
+  cycle 5: mean=0.7198  sd=0.0098
+
+Center norm by cycle  [true=0]:
+  cycle 0: ||c_k||=0.0213
+  cycle 1: ||c_k||=0.0136
+  cycle 2: ||c_k||=0.0217
+  cycle 3: ||c_k||=0.0194
+  cycle 4: ||c_k||=0.0400
+  cycle 5: ||c_k||=0.5955
+
+Normal cos_sim by cycle  [true signed=+1.0]:
+  cycle 0: signed=1.0000  abs=1.0000
+  cycle 1: signed=1.0000  abs=1.0000
+  cycle 2: signed=0.9997  abs=0.9997
+  cycle 3: signed=0.9993  abs=0.9993
+  cycle 4: signed=0.9998  abs=0.9998
+  cycle 5: signed=1.0000  abs=1.0000
+  signed: min=0.9993  med=0.9999
+  abs:    min=0.9993  med=0.9999
+
+Orientation score by cycle (e2 . normalize(a90))  [true>0, close to 1]:
+  cycle 0: 1.0000
+  cycle 1: 0.9998
+  cycle 2: 1.0000
+  cycle 3: 0.9999
+  cycle 4: 0.9998
+  cycle 5: 0.9998
+
+z_rms (posterior mean) : 0.0137  [true~0]
+
+RMSE (posterior mean trajectory)  [true sigma=0.02]:
+  total=0.0394  normal=0.0237  cyclic=0.0505  tangential=0.0394
+
+Phase monotone: True  (min dphi=0.062406)
+
+Frame orthonormality (n = cross(e1, e2)):
+  ||e1|| range: [1.00000, 1.00000]
+  ||e2|| range: [1.00000, 1.00000]
+  max |e1·e2| : 4.16e-17
+  max |e1·n|  : 5.55e-17
+  max |e2·n|  : 2.78e-17
+  max |n - cross(e1,e2)|: 2.22e-16
+
+Hierarchical scales (posterior mean):
+  sigma_c    : [0.11169798 0.07814556 0.07567846]
+  sigma_log_R: 0.0784
+
+======================================================================
+SUMMARY
+======================================================================
+  Divergences  : 0
+  sigma_x mean : 0.0649  [true=0.02, factor 3.2x]
+  R_k median   : 0.9991  [true=1.0]
+  signed n cos : min=0.9993  med=0.9999
+  abs n cos    : min=0.9993  med=0.9999
+  orient scores: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  RMSE total   : 0.0394  [true sigma=0.02]
+  RMSE cyclic  : 0.0505  RMSE normal: 0.0237
+  z_rms        : 0.0137
+
+ALL CYCLE-FIXED CHECKS PASSED

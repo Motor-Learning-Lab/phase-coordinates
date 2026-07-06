@@ -22,29 +22,40 @@ Within a cycle, only phase, radius, and perpendicular displacement vary over tim
 
 ## Variables
 
-For cycle `k`:
+Layer 1 samples only `tau` and `c`. Normals are derived, not sampled.
+
+Layer 2 Bayesian variables per cycle `k`:
 
 ```text
 c_k      cycle center
-n_k      unit normal of the cycle plane
 R_k      cycle mean radius
-a_k      phase-zero / cycle-origin vector
+```
+
+Fixed anchor constants per cycle (computed from Layer 1 posterior mean boundaries by real-valued data interpolation — not rounded to integer indices):
+
+```text
+x0_k   = interp_X(tau_mean[k])              # phase-zero data point
+x90_k  = interp_X(tau_mean[k] + 0.25*T_k)  # quarter-phase data point
+```
+
+Deterministic frame per cycle (derived inside the PyMC model from the sampled `c_k` and the fixed constants):
+
+```text
+a0_k       = x0_const  - c_k            # moves with c_k
+a90_k      = x90_const - c_k            # moves with c_k
+
+e1_k       = normalize(a0_k)
+a90_orth_k = a90_k - e1_k * dot(a90_k, e1_k)
+e2_k       = normalize(a90_orth_k)
+n_k        = normalize(cross(e1_k, e2_k))
 ```
 
 For time point `t` in cycle `k`:
 
 ```text
-phi_t    phase
+phi_t    phase (deterministic linear-in-cycle)
 r_t      instantaneous radius
 z_t      signed perpendicular displacement
-```
-
-The in-plane basis is defined from `n_k` and `a_k`:
-
-```text
-proj_a_k = a_k - n_k * dot(n_k, a_k)
-e1_k = proj_a_k / norm(proj_a_k)
-e2_k = cross(n_k, e1_k)
 ```
 
 The prediction is:
@@ -59,19 +70,7 @@ pred[t] =
 
 ## Hierarchical cycle-level geometry
 
-The cycle-level variables are Bayesian parameters, not fixed deterministic estimates.
-
-For each cycle-level variable, Layer 1 provides the cycle-specific prior mean. Across-cycle variation in the Layer 1 estimates sets the scale of the hierarchical variability prior.
-
-The generic pattern is:
-
-```text
-empirical_across_cycle_sd = sd of Layer 1 means across cycles
-sigma_variable ~ HalfNormal(scale = max(empirical_across_cycle_sd, floor))
-variable_k ~ Normal(Layer1_mean_k, sigma_variable)
-```
-
-For normals, use angular/tangent-plane deviations rather than raw unnormalized components.
+Only `c_k` and `R_k` are independently sampled Bayesian parameters. `n_k`, `e1_k`, `e2_k` are derived from `c_k` and fixed data constants.
 
 ## Center
 
@@ -80,11 +79,9 @@ sigma_c[d] ~ HalfNormal(scale = max(sd_k(c1_mean[k,d]), 0.02*R_X))
 c_k[d] ~ Normal(c1_mean[k,d], sigma_c[d])
 ```
 
-`c_k` is fixed within cycle.
+`c_k` is fixed within cycle. Moving `c_k` automatically rotates the frame because both anchors subtract `c_k`.
 
 ## Cycle mean radius
-
-Prefer log scale:
 
 ```text
 sigma_log_R ~ HalfNormal(scale = max(sd_k(log(R1_mean[k])), 0.03))
@@ -92,35 +89,31 @@ log_R_k ~ Normal(log(R1_mean[k]), sigma_log_R)
 R_k = exp(log_R_k)
 ```
 
-`R1_mean[k]` should be a data-derived radius estimate for cycle `k`, such as median in-plane distance from the Layer 1 center.
+`R1_mean[k]` is the median in-plane distance from the Layer 1 center within each cycle.
 
-## Normal
+## Normal (derived)
 
-Use tangent-plane deviations:
+The normal is not an independently sampled variable. It is derived inside the model as `n_k = normalize(cross(e1_k, e2_k))` from the two-anchor frame.
 
-```text
-Q_k = tangent basis at n1_mean[k]
-delta_n[k] ~ Normal(0, sigma_n_angle)
-n_k = normalize(n1_mean[k] + Q_k @ delta_n[k])
-```
+No `sigma_n_angle`, `delta_n`, or sign-alignment operations are part of the active model.
 
-with:
+## Cycle anchors (fixed constants, not sampled)
+
+The phase-zero and quarter-phase anchor points are computed once from the Layer 1 posterior mean boundaries and fixed as PyTensor constants before sampling begins:
 
 ```text
-sigma_n_angle ~ HalfNormal(scale = max(empirical angular sd across cycles, 0.03 rad))
+x0_arr  = interp_X(tau_mean[:-1])
+x90_arr = interp_X(tau_mean[:-1] + 0.25 * T_k)
+x0_const  = pt.constant(x0_arr)
+x90_const = pt.constant(x90_arr)
 ```
 
-## Cycle origin
-
-Start with a vector hierarchy:
+These are not sampled. Inside the model, the anchor vectors adjust with `c_k`:
 
 ```text
-a1_mean[k] = X(tau_k) - c1_mean[k]
-sigma_a[d] ~ HalfNormal(scale = max(sd_k(a1_mean[k,d]), 0.02*R_X))
-a_k[d] ~ Normal(a1_mean[k,d], sigma_a[d])
+a0_k  = x0_const  - c_k
+a90_k = x90_const - c_k
 ```
-
-Then project `a_k` into the plane to define `e1_k`.
 
 ## Phase
 
@@ -154,11 +147,14 @@ On fixed-plane synthetic data, the cycle-fixed model should recover:
 sigma_x near 0.02
 R_k near 1.0
 small center norm
-normal cos_sim near 1.0
+signed normal cos_sim near +1.0 (all positive)
+orientation score (e2 . normalize(a90)) near 1.0
 small z_rms
 RMSE near noise level
 few or no divergences
 no catastrophic chain split
 ```
+
+The signed normal check and orientation score replace the old absolute cos_sim check. The sign is guaranteed correct by construction because `n = cross(e1, e2)` uses the oriented anchors.
 
 Only after these diagnostics pass should the branch revisit richer within-cycle phase or radius flexibility.
