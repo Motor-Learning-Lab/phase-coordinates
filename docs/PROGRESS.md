@@ -14,8 +14,8 @@ python for everything**, not the `python` on PATH.
 
 ## Status as of last update (2026-07-06)
 
-**Reparameterization complete; a2_init fix implemented; amplitude-noise ridge
-remains the open problem. Test passes but radius/sigma_x are off ground truth.**
+**Reparameterization complete; a2_init fixes applied; amplitude-noise ridge
+confirmed as the core unsolved problem. Test passes but radius/sigma_x are off.**
 
 The full reparameterization (tangent-plane normals + boundary-normalized phase)
 eliminated divergences and the localized normal artifact. Amplitude parameters
@@ -24,24 +24,23 @@ in the posterior: `r_t` and `sigma_x` can trade off (`r × sigma_x ≈ const`) a
 a nearly-flat likelihood direction. NUTS exploits this ridge during warmup and gets
 stuck at the wrong mode.
 
-**Identified root cause of initvals problem (finding 8):** Layer 1's per-cycle mean
-boundary direction (`a_mean_p`) deviates ~21° from the actual data at tau_k, creating
-~19-sigma residuals at the Layer 2 initvals (sigma_x=0.02). This corrupts both MAP
-optimization and NUTS warmup. **Fix applied:** compute `a2_init[k] = X_fit[idx_k] -
-c_mean_p[k]` from the actual data at each boundary time. This reduced residuals at
-initvals to ~noise level. Also reverted `_OBS_NOISE_LOGNORMAL_SD` from 0.3 back to 0.5
-(0.3 caused 400+ divergences regardless of initvals; finding 7 below).
+**Fixes applied (findings 8, 11):**
+- initval: `a2_init[k] = X_fit[idx_k] - c_mean_p[k]` (reduced ~19-sigma boundary
+  residuals to noise level; finding 8)
+- prior mean: changed `a2 ~ Normal(mu=a_mean_p, ...)` to `a2 ~ Normal(mu=a2_init, ...)`
+  (theoretically correct; marginal improvement only — finding 11)
+- Reverted `_OBS_NOISE_LOGNORMAL_SD` from 0.3 back to 0.5 (finding 7)
 
-**Current test result** (`test_layer2.py` with a2_init fix, sigma=0.5): test
-assertions PASS (all), 51 divergences, radius median 1.148 (was 0.709), sigma_x
-0.341 (was 0.467). Progress, but amplitude still far from ground truth (~1.0, ~0.02).
+**Current test result** (`test_layer2.py`, finding 11): test assertions PASS, 40
+divergences, radius median 1.123, sigma_x 0.362. The a2 prior-mean change did not
+substantially resolve the amplitude-noise ridge. sigma_x is still ~18x ground truth.
 
-**Best amplitude result to date:** fixed sigma_x gave radius=0.961 (finding 9).
-Proves trajectory params converge correctly when the amplitude-noise ridge is broken.
-Current live experiment: two-phase approach (Phase 1 fixed sigma_x → Phase 2 warm
-start with free sigma_x). See finding 10.
+**Confirmed:** the amplitude-noise ridge is the dominant problem, not the a2 prior.
+Fixed sigma_x gives radius=0.961 (finding 9), proving trajectory params converge
+correctly when the ridge is broken. Next step: four-condition comparison (A-D) per
+finding 11 to isolate whether the remaining error is from the ridge or something else.
 
-**See "Layer 2 findings" items 4-10 for the detailed evidence trail.**
+**See "Layer 2 findings" items 4-11 for the detailed evidence trail.**
 
 **Environment**: a new pixi environment is now set up for this project
 (`pixi.toml` at the repo root). Use `pixi run python <script>` or
@@ -539,6 +538,41 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
 
     A `test_layer2_twophase.py` script was written and launched but was killed (OOM,
     exit 137) before completing. Needs re-run or memory investigation.
+
+11. **a2 prior-mean hypothesis tested: marginal improvement, ridge persists (2026-07-06).**
+    Hypothesis: using `a_mean_p` as the Layer 2 prior mean for `a2` (not just the
+    initval) creates a persistent pull on the frame direction throughout sampling, not
+    just at initialization. Because `a(t)` defines `e1(t)` (the direction in which
+    radius acts), a bad `a2` prior mean could mis-orient the cyclic term and cause the
+    model to compensate with a wrong radius + inflated sigma_x — i.e., produce an
+    apparent amplitude-noise ridge even if the deeper problem is a bad frame prior.
+
+    **Change applied:** `a2 ~ Normal(mu=a2_init, sigma=sigma_a2)` instead of
+    `a2 ~ Normal(mu=a_mean_p, sigma=sigma_a2)`. Both initval and prior mean now use
+    the data-at-tau_k direction.
+
+    **Result** (`test_layer2.py`, 2026-07-06, 417s):
+    - Divergences: **40** (was 51 — slight improvement)
+    - Radius median: **1.123** (was 1.148 — slight improvement)
+    - sigma_x_mean: **0.362** (was 0.341 — essentially unchanged)
+    - normal cos_sim: min 0.989, median 0.997 (comparable)
+    - Phase monotonic: yes
+    - Perp deviation median abs: 0.043 (was 0.062 — improvement)
+    - All assertions: PASS
+
+    **Conclusion:** the a2 prior-mean hypothesis is not the main driver. The amplitude-
+    noise ridge remains essentially intact. sigma_x is still ~18x the true value and
+    radius is still ~12% above ground truth. The change is kept (it is theoretically
+    correct — a2_init is a better prior mean than a_mean_p), but it does not resolve
+    the convergence problem.
+
+    Recommended next diagnostic: four-condition comparison to isolate contributions:
+    - A: free sigma_x, prior mean a_mean_p (baseline before all recent fixes)
+    - B: fixed sigma_x, prior mean a_mean_p
+    - C: free sigma_x, prior mean a2_init (current state)
+    - D: fixed sigma_x, prior mean a2_init
+    Or: a log-likelihood slice over (radius, sigma_x) with all geometry fixed, to
+    confirm the ridge shape and magnitude directly.
 
 ## Design decisions / deviations from the literal spec (for the final report)
 

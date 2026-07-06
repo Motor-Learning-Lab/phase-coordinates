@@ -825,7 +825,13 @@ def _fit_layer2(
         n_t = pm.Deterministic("normal", n_bar_t / n_bar_norm)
 
         # --- Boundary direction ---
-        a2 = pm.Normal("a2", mu=a_mean_p, sigma=sigma_a2, shape=a_mean_p.shape)
+        # Use a2_init (data at tau_k minus estimated center) as the prior mean,
+        # not Layer 1's a_mean_p. Layer 1's a_mean_p is a posterior average of
+        # the cycle-level boundary direction; for the boundary-anchored frame we
+        # need the instantaneous direction from the estimated center to the
+        # actual data point at tau_k. Using a_mean_p as the prior mean was shown
+        # to create ~19-sigma boundary residuals that corrupt NUTS warmup.
+        a2 = pm.Normal("a2", mu=a2_init, sigma=sigma_a2, shape=a_mean_p.shape)
         a_t = pm.Deterministic("a", pt.dot(B_const, a2))
 
         # Boundary-anchored in-plane frame
