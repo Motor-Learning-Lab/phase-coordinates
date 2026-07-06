@@ -47,6 +47,7 @@ hierarchical scales: sigma_c, sigma_log_R, sigma_n_angle, sigma_a
 | File | Script | Config | Result |
 |---|---|---|---|
 | `13_layer2_cycle_fixed_first_run.log` | `test_layer2_cycle_fixed.py` | tune=400, draws=400, chains=2, target_accept=0.9, seed=0 | **3 divergences, 19s.** Normal cos_sim=1.0000 all cycles. Center norms 0.04–0.19 (confound eliminated). z_rms=0.004. BUT sigma_x=0.591 (30×true), R_k=0.217 (5×too small) — amplitude ridge persists in R_k/sigma_x space. Assertion on R_k median fails. See PROGRESS.md finding 1. |
+| `14_cycle_fixed_oriented_frame.log` | `test_layer2_cycle_fixed.py` | tune=400, draws=400, chains=2, target_accept=0.9, seed=0 | **3 divergences, 20s.** Two-anchor oriented frame. R_k=0.999 (**fixed**, was 0.217). sigma_x=0.052 (2.6×true, was 30×). Signed normal cos_sim min=0.9954 (all positive). RMSE total=0.044, z_rms=0.036 (cycle-5 boundary artifact). ALL CHECKS PASSED. See PROGRESS.md finding 3. |
 
 ## Legacy scripts
 

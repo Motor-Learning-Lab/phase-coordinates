@@ -182,6 +182,49 @@ def normalize(v, axis=-1, eps=1e-12):
     return v / np.clip(norm, eps, None)
 
 
+def interp_X_at_times(X, fs, query_t):
+    """
+    Linearly interpolate trajectory X (n_time, 3) at real-valued query times.
+    Uses absolute time t = sample_index / fs. Safe for query_t outside the
+    data range (extrapolates as edge values via np.interp's default behaviour).
+    """
+    t_grid = np.arange(len(X)) / fs
+    return np.column_stack([
+        np.interp(query_t, t_grid, X[:, d])
+        for d in range(X.shape[1])
+    ])
+
+
+def _oriented_frame_from_anchors(x0, x90, c, eps=1e-12):
+    """
+    Compute a consistently oriented in-plane frame for each cycle from two
+    phase anchors and the cycle center.
+
+    Parameters
+    ----------
+    x0  : (K_cyc, 3) — interpolated data at the phase-zero time tau_k
+    x90 : (K_cyc, 3) — interpolated data at the quarter-cycle time tau_k + 0.25*T_k
+    c   : (K_cyc, 3) — cycle centers
+
+    Returns
+    -------
+    a0, a90    : anchor vectors relative to c  (K_cyc, 3)
+    e1, e2     : orthonormal in-plane basis    (K_cyc, 3)
+    n          : unit normal = cross(e1, e2)   (K_cyc, 3)
+    a90_orth_norm : ||a90 - e1*dot(a90,e1)||  (K_cyc,)  — near-zero flags degenerate quarter
+    """
+    a0 = x0 - c
+    a90 = x90 - c
+    e1 = a0 / np.maximum(np.linalg.norm(a0, axis=1, keepdims=True), eps)
+    dot_a90_e1 = np.sum(a90 * e1, axis=1, keepdims=True)
+    a90_orth = a90 - e1 * dot_a90_e1
+    a90_orth_norm = np.linalg.norm(a90_orth, axis=1)
+    e2 = a90_orth / np.maximum(a90_orth_norm[:, None], eps)
+    n = np.cross(e1, e2)
+    n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), eps)
+    return a0, a90, e1, e2, n, a90_orth_norm
+
+
 def align_normal_signs(normals):
     """
     Flip signs of consecutive normals so adjacent pairs have positive dot
@@ -444,12 +487,17 @@ class _Layer1Summary:
     u_hat: np.ndarray
     u_mean: np.ndarray
     u_sd: np.ndarray
-    normal_mean: np.ndarray
+    normal_mean: np.ndarray         # oriented: cross(e1, e2) from two-anchor frame
     normal_angular_sd: np.ndarray
     boundary_direction_mean: np.ndarray
     boundary_direction_sd: np.ndarray
     rho_tau_mean: float
     idata: Any
+    # Oriented frame (from two-anchor construction at Layer 1 posterior means)
+    a0_mean: np.ndarray             # (K_cyc, 3) phase-zero anchor vectors
+    a90_mean: np.ndarray            # (K_cyc, 3) quarter-phase anchor vectors
+    e1_mean: np.ndarray             # (K_cyc, 3) oriented e1 per cycle
+    e2_mean: np.ndarray             # (K_cyc, 3) oriented e2 per cycle
 
 
 def _sample_kwargs(draws, tune, chains, target_accept, random_seed, use_numba, initvals=None):
@@ -514,8 +562,15 @@ def _fit_layer1(
 
     tau_hat = tau_idx / fs
     c_hat = seed_cycle_centers(X, tau_idx)
-    n_hat = seed_cycle_normals(X, tau_idx)
-    u_hat = n_hat.copy()  # unconstrained-vector seed = unit normal seed
+    # Oriented normal seed from two-anchor frame at the seed boundary times.
+    # Replaces sign-ambiguous PCA normal so the prior is centered at the
+    # correct half-space from the start.
+    t_x0_hat = tau_hat[:-1]
+    t_x90_hat = tau_hat[:-1] + 0.25 * (tau_hat[1:] - tau_hat[:-1])
+    x0_hat = interp_X_at_times(X, fs, t_x0_hat)
+    x90_hat = interp_X_at_times(X, fs, t_x90_hat)
+    _, _, _, _, n_hat, _ = _oriented_frame_from_anchors(x0_hat, x90_hat, c_hat)
+    u_hat = n_hat.copy()  # unconstrained-vector seed = oriented normal
 
     t_grid_const = pt.constant(t_grid, name="t_grid")
     X_const = pt.constant(X, name="X_grid")
@@ -598,18 +653,24 @@ def _fit_layer1(
     c_sd = post["c"].std(("chain", "draw")).values
     u_mean = post["u"].mean(("chain", "draw")).values
     u_sd = post["u"].std(("chain", "draw")).values
-    n_mean = normalize(post["n"].mean(("chain", "draw")).values)
     a_mean = post["a"].mean(("chain", "draw")).values
     a_sd = post["a"].std(("chain", "draw")).values
     rho_tau_mean = float(post["rho_tau"].mean(("chain", "draw")).values)
 
-    # Angular SD of the posterior normal-vector samples around their mean
-    # direction, per cycle (used for the "normal dominated by prior"
-    # diagnostic and reported uncertainty).
+    # Oriented frame from two-anchor construction at Layer 1 posterior means.
+    # This gives a sign-consistent normal for use as Layer 2 prior mean.
+    t_x0_post = tau_mean[:-1]
+    t_x90_post = tau_mean[:-1] + 0.25 * (tau_mean[1:] - tau_mean[:-1])
+    x0_post = interp_X_at_times(X, fs, t_x0_post)
+    x90_post = interp_X_at_times(X, fs, t_x90_post)
+    a0_mean_arr, a90_mean_arr, e1_mean_arr, e2_mean_arr, n_oriented, _ = \
+        _oriented_frame_from_anchors(x0_post, x90_post, c_mean)
+
+    # Angular SD relative to oriented normal (sign-invariant arccos)
     n_samples = post["n"].values.reshape(-1, K - 1, 3)
     normal_angular_sd = np.empty(K - 1)
     for k in range(K - 1):
-        cos_to_mean = np.clip(n_samples[:, k, :] @ n_mean[k], -1.0, 1.0)
+        cos_to_mean = np.clip(n_samples[:, k, :] @ n_oriented[k], -1.0, 1.0)
         normal_angular_sd[k] = np.std(np.arccos(np.abs(cos_to_mean)))
 
     return _Layer1Summary(
@@ -622,12 +683,16 @@ def _fit_layer1(
         u_hat=u_hat,
         u_mean=u_mean,
         u_sd=u_sd,
-        normal_mean=n_mean,
+        normal_mean=n_oriented,     # oriented: cross(e1, e2) from two-anchor frame
         normal_angular_sd=normal_angular_sd,
         boundary_direction_mean=a_mean,
         boundary_direction_sd=a_sd,
         rho_tau_mean=rho_tau_mean,
         idata=idata1,
+        a0_mean=a0_mean_arr,
+        a90_mean=a90_mean_arr,
+        e1_mean=e1_mean_arr,
+        e2_mean=e2_mean_arr,
     )
 
 
@@ -687,25 +752,24 @@ def _fit_layer2(
     use_numba,
 ):
     """
-    Cycle-fixed geometry Layer 2 model.
+    Cycle-fixed geometry Layer 2 model with oriented two-anchor frame.
 
-    Center, plane normal, in-plane frame, and mean radius are cycle-level
-    Bayesian hierarchical parameters (one value per cycle, constant within
-    cycle).  Phase is linear within each cycle (deterministic, no free
-    parameters).  Perpendicular deviation uses a K-knot spline with a
-    smoothness prior.
+    Frame convention: for cycle k, interpolate data at the phase-zero time
+    (tau_k) and the quarter-cycle time (tau_k + 0.25*T_k), then construct:
 
-    Replaces the previous instantaneous-geometry model whose center/orbit/noise
-    three-way confound (corr(sigma_x, center_rms) = -0.999) prevented amplitude
-    convergence.  See docs/cycle_fixed_geometry_model.md and PROGRESS.md
-    finding 13.
+        e1_k = normalize(a0_k)
+        e2_k = normalize(a90_k - e1_k * dot(a90_k, e1_k))
+        n_k  = normalize(cross(e1_k, e2_k))
+
+    This removes the sign ambiguity that caused the old model's frame to be
+    inverted, traversing the orbit backward and collapsing R_k toward zero.
     """
     pm = _import_pymc()
     pt = _import_pytensor_tensor()
 
     tau_mean = layer1.tau_mean      # (K,) boundary times
     K = len(tau_mean)
-    K_cyc = K - 1                   # number of cycles
+    K_cyc = K - 1
 
     i0 = max(0, int(np.ceil(tau_mean[0] * fs)))
     i1 = min(X.shape[0] - 1, int(np.floor(tau_mean[-1] * fs)))
@@ -720,98 +784,115 @@ def _fit_layer2(
 
     # --- Cycle membership ---
     cycle_idx_arr = np.searchsorted(tau_mean, t_fit, side="right") - 1
-    cycle_idx_arr = np.clip(cycle_idx_arr, 0, K_cyc - 1).astype(int)  # (n_time,)
+    cycle_idx_arr = np.clip(cycle_idx_arr, 0, K_cyc - 1).astype(int)
     cycle_idx_const = pt.constant(cycle_idx_arr)
 
-    # --- Layer 1 per-cycle summaries (K_cyc items each) ---
-    c1_mean = layer1.center_mean             # (K_cyc, 3)
-    n1_mean = normalize(layer1.normal_mean)  # (K_cyc, 3)
+    # --- Layer 1 per-cycle summaries ---
+    c1_mean = layer1.center_mean   # (K_cyc, 3)
 
-    # a1_mean[k]: vector from estimated cycle center to actual data at tau_k
-    a1_mean_arr = np.zeros((K_cyc, 3))
+    # --- Two-anchor oriented frame prior means ---
+    T_k = tau_mean[1:] - tau_mean[:-1]               # (K_cyc,)
+    x0_mean = interp_X_at_times(X, fs, tau_mean[:-1])             # (K_cyc, 3)
+    x90_mean = interp_X_at_times(X, fs, tau_mean[:-1] + 0.25 * T_k)  # (K_cyc, 3)
+    a0_mean_arr, a90_mean_arr, e1_prior, e2_prior, n_prior, a90_orth_norms = \
+        _oriented_frame_from_anchors(x0_mean, x90_mean, c1_mean)
+
+    # --- Pre-sampling frame diagnostics ---
+    a90_normed = a90_mean_arr / np.maximum(
+        np.linalg.norm(a90_mean_arr, axis=1, keepdims=True), 1e-12
+    )
+    orient_scores = np.sum(e2_prior * a90_normed, axis=1)  # (K_cyc,)
+    print("\nPre-sampling oriented frame (Layer 2 prior means):")
+    print(f"  {'cyc':>4}  {'dot(e1,e2)':>11}  {'|e1|':>6}  {'|e2|':>6}  "
+          f"{'|n|':>6}  {'orient_score':>12}  {'a90_orth_norm':>14}")
     for k in range(K_cyc):
-        idx_k = int(round((tau_mean[k] - t_fit[0]) * fs))
-        idx_k = max(0, min(n_time - 1, idx_k))
-        a1_mean_arr[k] = X_fit[idx_k] - c1_mean[k]
+        print(
+            f"  {k:>4}  "
+            f"{float(np.dot(e1_prior[k], e2_prior[k])):>11.4f}  "
+            f"{float(np.linalg.norm(e1_prior[k])):>6.4f}  "
+            f"{float(np.linalg.norm(e2_prior[k])):>6.4f}  "
+            f"{float(np.linalg.norm(n_prior[k])):>6.4f}  "
+            f"{float(orient_scores[k]):>12.4f}  "
+            f"{float(a90_orth_norms[k]):>14.4f}"
+        )
+    print()
 
-    # R1_mean[k]: median in-plane distance from c1_mean[k] within cycle k
+    # --- R1_mean: median in-plane radius using oriented normal ---
     R1_mean = np.zeros(K_cyc)
     for k in range(K_cyc):
         mask_k = cycle_idx_arr == k
         if mask_k.sum() < 2:
-            R1_mean[k] = max(float(np.linalg.norm(a1_mean_arr[k])), 0.1 * R_X)
+            R1_mean[k] = max(float(np.linalg.norm(a0_mean_arr[k])), 0.1 * R_X)
             continue
         diff = X_fit[mask_k] - c1_mean[k]
-        perp = diff - (diff @ n1_mean[k])[:, None] * n1_mean[k]
+        perp = diff - (diff @ n_prior[k])[:, None] * n_prior[k]
         R1_mean[k] = float(np.median(np.linalg.norm(perp, axis=1)))
     R1_mean = np.maximum(R1_mean, 0.1 * R_X)
     log_R1_mean = np.log(R1_mean)
 
-    # --- Hierarchical prior scales: across-cycle SD of Layer 1 means ---
+    # --- Hierarchical prior scales ---
     sigma_c_scale = np.maximum(
         np.std(c1_mean, axis=0), _LAYER2_CENTER_FLOOR_FRAC * R_X
-    )  # (3,)
-    sigma_a_scale = np.maximum(
-        np.std(a1_mean_arr, axis=0), _LAYER2_BOUNDARY_DIR_FLOOR_FRAC * R_X
-    )  # (3,)
+    )
+    sigma_a0_scale = np.maximum(
+        np.std(a0_mean_arr, axis=0), _LAYER2_BOUNDARY_DIR_FLOOR_FRAC * R_X
+    )
+    sigma_a90_scale = np.maximum(
+        np.std(a90_mean_arr, axis=0), _LAYER2_BOUNDARY_DIR_FLOOR_FRAC * R_X
+    )
     sigma_logR_scale = float(max(float(np.std(log_R1_mean)), 0.03))
-    mean_n_dir = normalize(np.mean(n1_mean, axis=0))
-    angles = np.arccos(np.clip(np.abs(n1_mean @ mean_n_dir), 0.0, 1.0))
-    sigma_n_scale = float(max(float(np.std(angles)), _LAYER2_NORMAL_FLOOR))
 
-    # --- Normal tangent bases for delta_n parameterization ---
-    m_cyc = align_normal_signs(n1_mean)       # (K_cyc, 3) sign-aligned
-    Q_cyc = orthonormal_tangent_basis(m_cyc)  # (K_cyc, 3, 2)
-    Q_cyc_const = pt.constant(Q_cyc)
-    m_cyc_const = pt.constant(m_cyc)
-
-    # --- Linear phase: fully deterministic, no free parameters ---
-    # phi(t) = 2*pi*k + 2*pi*(t - tau_k)/(tau_{k+1} - tau_k) for t in cycle k
-    tau_k_arr = tau_mean[cycle_idx_arr]        # (n_time,)
-    tau_kp1_arr = tau_mean[cycle_idx_arr + 1]  # safe: cycle_idx_arr <= K_cyc-1 = K-2
+    # --- Linear phase: fully deterministic ---
+    tau_k_arr = tau_mean[cycle_idx_arr]
+    tau_kp1_arr = tau_mean[cycle_idx_arr + 1]
     phi_t_np = (
         2 * np.pi * cycle_idx_arr
         + 2 * np.pi * (t_fit - tau_k_arr) / (tau_kp1_arr - tau_k_arr)
     )
     phi_t_const = pt.constant(phi_t_np)
-    phase_vel_np = (2 * np.pi / (tau_mean[1:] - tau_mean[:-1]))[cycle_idx_arr]  # (n_time,)
+    phase_vel_np = (2 * np.pi / T_k)[cycle_idx_arr]
 
     # --- Spline matrix for z (K boundary-time knots) ---
-    B = cubic_spline_matrix(tau_mean, t_fit)   # (n_time, K)
+    B = cubic_spline_matrix(tau_mean, t_fit)
     B_const = pt.constant(B)
 
     with pm.Model():
         # --- Hierarchical center ---
         sigma_c = pm.HalfNormal("sigma_c", sigma=sigma_c_scale, shape=(3,))
         c_k = pm.Normal("c_k", mu=c1_mean, sigma=sigma_c, shape=(K_cyc, 3))
-        c_t = pm.Deterministic("center", c_k[cycle_idx_const])  # (n_time, 3)
+        c_t = pm.Deterministic("center", c_k[cycle_idx_const])
 
-        # --- Hierarchical normal: tangent-plane deviations, one per cycle ---
-        sigma_n_angle = pm.HalfNormal("sigma_n_angle", sigma=sigma_n_scale)
-        delta_n = pm.Normal("delta_n", mu=0.0, sigma=sigma_n_angle, shape=(K_cyc, 2))
-        tang_disp = pt.sum(Q_cyc_const * delta_n[:, None, :], axis=-1)  # (K_cyc, 3)
-        n_tilde = m_cyc_const + tang_disp
-        n_norm = pt.sqrt(pt.sum(n_tilde**2, axis=-1, keepdims=True) + 1e-12)
-        n_k = pm.Deterministic("n_k", n_tilde / n_norm)           # (K_cyc, 3)
-        n_t = pm.Deterministic("normal", n_k[cycle_idx_const])    # (n_time, 3)
+        # --- Phase-zero anchor (a0_k = x(tau_k) - c_k) ---
+        sigma_a0 = pm.HalfNormal("sigma_a0", sigma=sigma_a0_scale, shape=(3,))
+        a0_k = pm.Normal("a0_k", mu=a0_mean_arr, sigma=sigma_a0, shape=(K_cyc, 3))
 
-        # --- Hierarchical cycle-origin direction ---
-        sigma_a = pm.HalfNormal("sigma_a", sigma=sigma_a_scale, shape=(3,))
-        a_k = pm.Normal("a_k", mu=a1_mean_arr, sigma=sigma_a, shape=(K_cyc, 3))
-        a_t = pm.Deterministic("a", a_k[cycle_idx_const])         # (n_time, 3)
+        # --- Quarter-phase anchor (a90_k = x(tau_k + 0.25*T_k) - c_k) ---
+        sigma_a90 = pm.HalfNormal("sigma_a90", sigma=sigma_a90_scale, shape=(3,))
+        a90_k = pm.Normal("a90_k", mu=a90_mean_arr, sigma=sigma_a90, shape=(K_cyc, 3))
 
-        # In-plane frame (constant within cycle by construction)
-        proj = a_t - n_t * pt.sum(n_t * a_t, axis=-1, keepdims=True)
-        proj_norm = pt.sqrt(pt.sum(proj**2, axis=-1, keepdims=True) + 1e-12)
-        e1_t = pm.Deterministic("e1", proj / proj_norm)
-        e2_t = pm.Deterministic("e2", _pt_cross(n_t, e1_t, pt))
-        pm.Deterministic("projection_norm", proj_norm[:, 0])
+        # --- Oriented frame: e1 from a0, e2 from a90 ortho, n = cross(e1, e2) ---
+        a0_norm = pt.sqrt(pt.sum(a0_k**2, axis=-1, keepdims=True) + 1e-12)
+        e1_k = pm.Deterministic("e1_k", a0_k / a0_norm)
+
+        dot_a90_e1 = pt.sum(a90_k * e1_k, axis=-1, keepdims=True)
+        a90_orth = a90_k - e1_k * dot_a90_e1
+        a90_orth_n = pt.sqrt(pt.sum(a90_orth**2, axis=-1, keepdims=True) + 1e-12)
+        e2_k = pm.Deterministic("e2_k", a90_orth / a90_orth_n)
+
+        n_cross = _pt_cross(e1_k, e2_k, pt)
+        n_cross_n = pt.sqrt(pt.sum(n_cross**2, axis=-1, keepdims=True) + 1e-12)
+        n_k = pm.Deterministic("n_k", n_cross / n_cross_n)
+
+        # Per-time expansions
+        e1_t = pm.Deterministic("e1", e1_k[cycle_idx_const])
+        e2_t = pm.Deterministic("e2", e2_k[cycle_idx_const])
+        n_t = pm.Deterministic("normal", n_k[cycle_idx_const])
 
         # --- Hierarchical cycle mean radius ---
         sigma_log_R = pm.HalfNormal("sigma_log_R", sigma=sigma_logR_scale)
         log_R_k = pm.Normal("log_R_k", mu=log_R1_mean, sigma=sigma_log_R, shape=(K_cyc,))
         R_k = pm.Deterministic("R_k", pt.exp(log_R_k))
-        r_t = pm.Deterministic("radius", R_k[cycle_idx_const])    # (n_time,)
+        r_t = pm.Deterministic("radius", R_k[cycle_idx_const])
 
         # --- Perpendicular deviation: K-knot spline ---
         h_z_knots = pm.Normal("h_z_knots", mu=0.0, sigma=0.2 * R_X, shape=K)
@@ -819,9 +900,7 @@ def _fit_layer2(
             dhz = h_z_knots[1:] - h_z_knots[:-1]
             pm.Potential(
                 "perp_smoothness",
-                pm.logp(
-                    pm.Normal.dist(0.0, _PHASE_VELOCITY_SMOOTHNESS_SD * R_X), dhz
-                ).sum(),
+                pm.logp(pm.Normal.dist(0.0, _PHASE_VELOCITY_SMOOTHNESS_SD * R_X), dhz).sum(),
             )
         z_t = pm.Deterministic("perp_deviation", pt.dot(B_const, h_z_knots))
 
@@ -841,19 +920,18 @@ def _fit_layer2(
         initvals = {
             "sigma_c": sigma_c_scale,
             "c_k": c1_mean,
-            "sigma_n_angle": np.array(sigma_n_scale),
-            "delta_n": np.zeros((K_cyc, 2)),
-            "sigma_a": sigma_a_scale,
-            "a_k": a1_mean_arr,
+            "sigma_a0": sigma_a0_scale,
+            "a0_k": a0_mean_arr,
+            "sigma_a90": sigma_a90_scale,
+            "a90_k": a90_mean_arr,
             "sigma_log_R": np.array(sigma_logR_scale),
             "log_R_k": log_R1_mean,
             "h_z_knots": np.zeros(K),
             "rho_x": 0.03,
         }
-        sample_kw = _sample_kwargs(
+        idata2 = pm.sample(**_sample_kwargs(
             draws, tune, chains, target_accept, random_seed, use_numba, initvals
-        )
-        idata2 = pm.sample(**sample_kw)
+        ))
 
     post = idata2.posterior
 
@@ -863,10 +941,29 @@ def _fit_layer2(
     def psd(name):
         return post[name].std(("chain", "draw")).values
 
-    # Normal summary
-    normal_raw_mean = pmean("normal")                     # (n_time, 3)
+    # Reconstruct consistent (e1, e2, n) frame from posterior mean anchors.
+    # Averaging per-draw unit vectors (pmean("e1") etc.) produces vectors shorter
+    # than 1 when draws spread in direction, and the averaged e1/e2/n are not
+    # exactly consistent with each other. Reconstruction from mean a0_k/a90_k
+    # gives exact orthonormality by construction.
+    a0_mean_cyc = pmean("a0_k")    # (K_cyc, 3)
+    a90_mean_cyc = pmean("a90_k")  # (K_cyc, 3)
+    eps = 1e-12
+    e1_cyc = a0_mean_cyc / np.maximum(np.linalg.norm(a0_mean_cyc, axis=1, keepdims=True), eps)
+    dot_a90_e1c = np.sum(a90_mean_cyc * e1_cyc, axis=1, keepdims=True)
+    a90_orth_cyc = a90_mean_cyc - e1_cyc * dot_a90_e1c
+    e2_cyc = a90_orth_cyc / np.maximum(np.linalg.norm(a90_orth_cyc, axis=1, keepdims=True), eps)
+    n_cross_cyc = np.cross(e1_cyc, e2_cyc)
+    n_cyc_recon = n_cross_cyc / np.maximum(np.linalg.norm(n_cross_cyc, axis=1, keepdims=True), eps)
+    # Expand to per-time (exact unit norm and mutual orthogonality)
+    e1_mean = e1_cyc[cycle_idx_arr]
+    e2_mean = e2_cyc[cycle_idx_arr]
+    normal_mean = n_cyc_recon[cycle_idx_arr]
+
+    # Resultant length diagnostic uses the raw Deterministic posterior mean
+    # (not the reconstruction) so it can detect bimodal frame distributions.
+    normal_raw_mean = pmean("normal")                       # (n_time, 3)
     normal_resultant_length = np.linalg.norm(normal_raw_mean, axis=-1)
-    normal_mean = normalize(normal_raw_mean)
 
     normal_samples = post["normal"].values.reshape(-1, n_time, 3)
     cos_to_mean = np.clip(
@@ -874,9 +971,9 @@ def _fit_layer2(
     )
     normal_angular_sd = np.std(np.arccos(np.abs(cos_to_mean)), axis=0)
 
-    # Reconstruct e1/e2 from posterior-mean n and a for exact orthonormality
-    a_mean_fit = pmean("a")
-    e1_mean, e2_mean, projection_norm_mean = construct_frame(normal_mean, a_mean_fit)
+    # boundary_direction_mean = per-time a0 (for projection diagnostic compat)
+    boundary_dir_mean = a0_mean_cyc[cycle_idx_arr]      # (n_time, 3)
+    projection_norm_mean = np.linalg.norm(boundary_dir_mean, axis=1)  # (n_time,)
 
     return _Layer2Summary(
         time=t_fit,
@@ -892,7 +989,7 @@ def _fit_layer2(
         normal_angular_sd=normal_angular_sd,
         e1_mean=e1_mean,
         e2_mean=e2_mean,
-        boundary_direction_mean=a_mean_fit,
+        boundary_direction_mean=boundary_dir_mean,
         projection_norm_mean=projection_norm_mean,
         radius_mean=pmean("radius"),
         radius_sd=psd("radius"),

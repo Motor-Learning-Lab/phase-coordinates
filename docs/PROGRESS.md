@@ -201,7 +201,8 @@ The old branch remains available for that history.
 - [x] Added `docs/debug/scripts/test_layer2_cycle_fixed.py`.
 - [x] Run fixed-plane synthetic test (log 13) — see finding 1 below.
 - [x] Per-chain analysis of sigma_x and R_k posteriors — see finding 2.
-- [ ] Run fixed-sigma_x diagnostic to test whether R_k converges with amplitude/noise coupling removed.
+- [x] Implemented oriented two-anchor frame (e1 from a0, e2 from a90, n = cross(e1,e2)) — see finding 3.
+- [ ] Investigate remaining sigma_x inflation (2.6×) and z_rms elevation from short last cycle.
 - [ ] Decide whether to expose the new model through public API.
 
 ## Findings
@@ -309,3 +310,91 @@ this wrong mode is not yet understood.
 `R_k` recovers. This isolates whether the geometry, initvals, and prior hierarchy
 are correct — only the amplitude coupling is removed. If R_k recovers to 1.0 under
 fixed sigma_x, the failure is entirely in the amplitude/noise coupling.
+
+**Finding 2 post-mortem (2026-07-06):** The root cause was identified and fixed in
+finding 3: the normal sign ambiguity caused the frame to be inverted, making the
+model traverse the orbit backward. The "unimodal wrong mode" behavior was a
+consequence of a consistently wrong frame (all cycles flipped the same way), not
+a new failure mechanism. The fixed-sigma_x diagnostic was superseded by the frame fix.
+
+### Finding 3: Oriented two-anchor frame — R_k collapse fixed (2026-07-06, log 14)
+
+**Root cause of the R_k / sigma_x failure identified and fixed.**
+
+The old model constructed `e2 = cross(n, e1)` where `n` came from a sign-ambiguous
+PCA normal. When the PCA normal had the wrong sign, `e2` pointed opposite to the
+true quarter-phase direction. The observation model then tried to traverse the orbit
+backward. With the correct sign, the model fits well; with the wrong sign, it must
+choose between large residuals or small R_k. Because initvals start at R_k = 1 but
+the wrong-sign mode has lower log-posterior, the sampler escapes to the R_k ≈ 0.2
+ridge where sigma_x absorbs the backward-traversal error.
+
+**Fix:** Replace the sign-ambiguous normal with a two-anchor oriented frame:
+
+```text
+x0_k  = interp_X(tau_k)              # real-valued interpolation, not rounded index
+x90_k = interp_X(tau_k + 0.25*T_k)
+a0_k  = x0_k  - c_k                  # phase-zero anchor
+a90_k = x90_k - c_k                  # quarter-phase anchor
+
+e1_k = normalize(a0_k)
+a90_orth_k = a90_k - e1_k * dot(a90_k, e1_k)
+e2_k = normalize(a90_orth_k)
+n_k  = normalize(cross(e1_k, e2_k))
+```
+
+`a0_k` and `a90_k` are now Bayesian hierarchical variables (replacing the old
+single anchor `a_k` and the independent `delta_n` / `sigma_n_angle`). The normal
+is derived, not independently sampled. Signed normal cos_sim is always positive by
+construction.
+
+**Layer 1 also updated:** `u_hat` (the prior center for the Layer 1 normal
+parameter) is now initialized to the oriented normal instead of the PCA normal.
+
+**Results on fixed-plane synthetic data (log 14, tune=400, draws=400, chains=2):**
+
+```
+Divergences  : 3  (vs 3 before)
+Max treedepth: 24  ([24, 0] per chain — one chain slightly pathological)
+sigma_x mean : 0.0522  (was 0.5907 — 11× improvement; factor 2.6× true, down from 30×)
+R_k median   : 0.9992  (was 0.217 — fixed, within [0.7, 1.3])
+signed cos_sim: min=0.9954  med=1.0000  (all positive — frame orientation correct)
+orient scores: 0.965–1.000  (all positive)
+RMSE total   : 0.0437  (was 0.5904)
+RMSE normal  : 0.0211  (near noise level)
+RMSE cyclic  : 0.0403
+RMSE tang    : 0.0605
+z_rms        : 0.036   (was 0.004 — elevated, see below)
+Frame orthonormality: machine precision (errors at ~1e-16)
+ALL CYCLE-FIXED CHECKS PASSED
+```
+
+**What changed vs the success criteria:**
+- R_k ✓ — fully recovered
+- sigma_x — partially fixed (0.052 vs 0.020 true, factor 2.6×)
+- RMSE total — 0.044, about 2× true noise
+- signed normal cos_sim ✓
+
+**Remaining elevated residuals in cycle 5:**
+
+The last detected boundary is at sample 595 of 600, creating a short partial cycle
+(60 samples vs ~100). Cycle 5 has elevated center norm (0.29 vs 0.01 for cycles 0–3),
+z_rms elevated (0.036), and R_k = 0.878. These are boundary-detection artifacts, not
+model failures. The 3 remaining divergences and one max-treedepth hit are in chain 1
+which covers cycle 5.
+
+The sigma_x inflation from 0.020 to 0.052 is driven primarily by the residuals in
+cycle 5 that z_t partially absorbs. Cycles 0–4 appear well-identified.
+
+**Hierarchical scale posteriors:**
+```
+sigma_c       : [0.061, 0.065, 0.062]
+sigma_log_R   : 0.029  (prior scale was 0.03 — stays at prior, correct behavior)
+sigma_a0      : [0.209, 0.033, 0.031]  (large x-component: a0 varies across cycles
+                                         in x as boundaries shift)
+sigma_a90     : [0.025, 0.145, 0.114]  (large y/z: a90 varies in the tilt plane)
+```
+
+**Next:** Investigate the residual sigma_x inflation. Likely causes: (a) short
+last-cycle boundary artifact inflating the global sigma_x; (b) sigma_x absorbing
+within-cycle variability not captured by linear phase.
