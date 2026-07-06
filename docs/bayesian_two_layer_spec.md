@@ -1,617 +1,375 @@
-# Bayesian Two-Layer Phase Coordinate Estimation Specification
+# Bayesian Cycle-Fixed Geometry Specification
 
-This document specifies a Bayesian extension to the existing `phase_coordinates` package. The Bayesian estimator should live next to the deterministic cycle-fixed estimator. It should not replace `hilbert_phase` or `cycle_by_cycle_pca_coordinates`.
+This branch replaces the previous instantaneous-geometry Layer 2 direction with a more identifiable cycle-fixed geometry model.
 
-The target use case is 3D rhythmic movement data where we want posterior estimates of phase, radius, smoothly varying cycle-plane normal, center, and perpendicular deviation.
+The motivating diagnostic result from `bayesian-two-layer-estimator` was that allowing `center(t)` and other geometric quantities to vary instantaneously created a strong center/orbit/noise confound. The stable core model on this branch therefore keeps the movement geometry fixed within each cycle and estimates only phase, radius, and perpendicular displacement at the instantaneous time scale.
 
-This version of the specification reflects the current debugging conclusion from the Layer 2 convergence work:
+This document is the active specification for branch:
 
-1. The coarse cycle model remains useful and mostly unchanged.
-2. The original Layer 2 normal model, which splined raw unconstrained 3D vectors and then normalized them, is too fragile.
-3. The original Layer 2 phase model, which used a positive velocity spline plus a tight soft boundary potential, creates difficult NUTS geometry.
-4. The next implementation should use tangent-plane normal deviations and a phase parameterization that satisfies cycle boundaries by construction.
+```text
+bayesian-cycle-fixed-geometry
+```
 
-All equations below use `$...$` or `$$...$$` math delimiters so they render correctly in Markdown contexts used by this project.
+## Model summary
 
-## Core idea
+Layer 1 remains a coarse cycle model. It provides posterior summaries for cycle boundaries and cycle-level geometry.
 
-Use two models rather than one monolithic model.
+Layer 2 is now a cycle-fixed geometry model.
 
-1. **Layer 1: coarse cycle model** estimates dominant frequency, cycle boundaries, cycle centers, cycle-level normals, and boundary reference directions, while keeping posterior uncertainty.
-2. **Layer 2: instantaneous model** uses the coarse posterior summaries as priors for smoothly varying instantaneous quantities.
+For each cycle `k`, estimate cycle-level geometric variables:
 
-Layer 1 estimates cycle-level objects:
+```text
+c_k      cycle center
+n_k      cycle plane normal
+R_k      cycle mean radius
+a_k      cycle origin / phase-zero direction
+```
 
-$$
-\tau_k,\quad T_k,\quad c_k,\quad n_k,\quad a_k
-$$
+For each time point `t` inside cycle `k`, estimate instantaneous movement variables:
 
-Layer 2 estimates time-level objects:
+```text
+phi_t    phase
+r_t      radius
+z_t      perpendicular displacement from the cycle plane
+```
 
-$$
-\phi(t),\quad \omega(t),\quad c(t),\quad n(t),\quad e_1(t),\quad e_2(t),\quad r(t),\quad z(t)
-$$
+The observation model is:
 
-## Notation
+```text
+pred[t] =
+    c_k
+    + e1_k * r_t * cos(phi_t)
+    + e2_k * r_t * sin(phi_t)
+    + n_k  * z_t
 
-Let $X_t \in \mathbb{R}^3$ be the observed trajectory at time $t$.
+X[t] ~ Normal(pred[t], sigma_x)
+```
 
-- $\tau_k$: cycle boundary / phase-zero time for cycle $k$.
-- $T_k = \tau_{k+1}-\tau_k$: cycle duration.
-- $c_k \in \mathbb{R}^3$: cycle center, fixed within cycle $k$ in the coarse model.
-- $c(t) \in \mathbb{R}^3$: smooth instantaneous center.
-- $n_k \in S^2$: cycle-level unit plane normal.
-- $n(t) \in S^2$: smooth instantaneous unit plane normal.
-- $a_k = X(\tau_k)-c_k$: boundary-anchored reference direction.
-- $a(t)$: cubic spline interpolation of $a_k$.
-- $e_1(t)$: in-plane x-axis, defined by projecting $a(t)$ into the instantaneous plane.
-- $e_2(t)=n(t)\times e_1(t)$: in-plane y-axis.
-- $\phi(t)$: monotone instantaneous phase.
-- $\omega(t)=d\phi/dt$: positive instantaneous phase velocity.
-- $r(t)>0$: instantaneous in-plane radius.
-- $z(t)$: instantaneous perpendicular deviation.
+where:
 
-## Data-derived scale
+```text
+e1_k = normalized projection of a_k into the plane orthogonal to n_k
+e2_k = cross(n_k, e1_k)
+```
 
-Compute a robust characteristic movement scale from the data:
+The defining restriction of this branch is:
 
-$$
-\bar{x}=\operatorname{median}_t X_t
-$$
+```text
+center and plane are fixed within each cycle
+```
 
-$$
-R_X=\operatorname{median}_t \lVert X_t-\bar{x}\rVert
-$$
+They may vary across cycles, but they do not vary instantaneously.
 
-If $R_X$ is too small, use an RMS fallback:
+## Why this model exists
 
-$$
-R_X=\sqrt{\frac{1}{N}\sum_t \lVert X_t-\bar{x}\rVert^2}
-$$
+The previous instantaneous-geometry model estimated:
 
-All spatial priors should be expressed relative to $R_X$.
+```text
+center(t)
+normal(t)
+in-plane frame(t)
+phase(t)
+radius(t)
+z(t)
+sigma_x
+```
 
-## Layer 1: coarse cycle model
+Diagnostics showed that the center trajectory could absorb large parts of the orbit. In the failed fixed-plane synthetic run, center summaries were strongly coupled to `sigma_x` and radius, while residuals were overwhelmingly in-plane rather than normal. This indicated a three-way confound:
 
-Layer 1 can continue to use the existing implementation strategy unless debugging shows otherwise.
+```text
+center(t) <-> orbit/radius <-> sigma_x
+```
 
-### Frequency and duration
+The cycle-fixed model removes that confound by making `c_k`, `n_k`, `R_k`, and `a_k` cycle-level variables.
 
-Estimate a crude dominant frequency $f_0$ using periodogram, autocorrelation, Hilbert phase, or peak/event detection. Define:
+## Layer 1 handoff
 
-$$
-T_0=\frac{1}{f_0}
-$$
+Layer 1 should provide, at minimum:
 
-Use a log-duration prior:
+```text
+tau_mean[k]                 posterior mean cycle boundary
+c1_mean[k, 3]               cycle center posterior mean
+n1_mean[k, 3]               cycle normal posterior mean, sign-aligned
+boundary direction estimate  a1_mean[k, 3]
+optional posterior SDs       c1_sd, n angular sd, a1_sd
+```
 
-$$
-\log T_k \sim \mathcal{N}(\log T_0,0.15^2)
-$$
+Layer 1 means set Layer 2 prior means. Layer 2 hierarchical scale parameters control how far cycle-level variables may move away from those Layer 1 means.
 
-### Boundary times
+## Hierarchical priors for cycle-level fixed variables
 
-Let $\hat{\tau}_k$ be initial candidate boundaries. Use:
+The cycle-level variables are Bayesian, not deterministic. Each has:
 
-$$
-\tau_k \sim \mathcal{N}(\hat{\tau}_k,(0.075T_0)^2)
-$$
+```text
+Layer 1 mean as cycle-specific prior mean
+hierarchical variability across cycles
+HalfNormal prior on that variability
+HalfNormal scale set by empirical across-cycle variability
+```
 
-Use $0.10T_0$ instead of $0.075T_0$ if the initial boundary detector is weak.
+Use robust floors so that the prior does not become degenerate when synthetic cycles are nearly identical.
 
-### Boundary clustering likelihood
+### Center hierarchy
 
-The phase-zero boundary is identified by spatial reproducibility. Model:
+For each coordinate `d`:
 
-$$
-X(\tau_k) \sim \mathcal{N}(\mu_\tau,\Sigma_\tau)
-$$
+```text
+empirical_sd_c[d] = sd across k of c1_mean[k, d]
+sigma_c[d] ~ HalfNormal(scale = max(empirical_sd_c[d], center_floor))
+c_k[d] ~ Normal(c1_mean[k, d], sigma_c[d])
+```
 
-Start with an isotropic boundary cloud:
+Suggested floor:
 
-$$
-\Sigma_\tau = (\sigma_\tau^{(x)})^2I
-$$
+```text
+center_floor = 0.02 * R_X
+```
 
-Use a dimensionless scatter parameter:
+The center is fixed within cycle:
 
-$$
-\sigma_\tau^{(x)}=R_X\rho_\tau
-$$
+```text
+c(t) = c_k for tau_k <= t < tau_{k+1}
+```
 
-$$
-\rho_\tau\sim\operatorname{LogNormal}(\log 0.10,0.5^2)
-$$
+Do not spline `c_k` across time in this branch.
 
-This says the boundary point is expected to repeat within about 10% of movement radius, while allowing smaller and larger scatter.
+### Cycle mean radius hierarchy
 
-### Cycle center
+Compute a Layer 1 / deterministic cycle radius prior mean:
 
-Compute an initial center estimate $\hat{c}_k$ per cycle, for example:
+```text
+R1_mean[k] = median in-plane distance from c1_mean[k] within cycle k
+```
 
-$$
-\hat{c}_k = \operatorname{mean}_{t\in k}X_t
-$$
+Prefer a log-scale hierarchy:
 
-Use:
+```text
+log_R1_mean[k] = log(max(R1_mean[k], radius_floor))
+empirical_sd_log_R = sd across k of log_R1_mean[k]
+sigma_log_R ~ HalfNormal(scale = max(empirical_sd_log_R, log_radius_floor))
+log_R_k ~ Normal(log_R1_mean[k], sigma_log_R)
+R_k = exp(log_R_k)
+```
 
-$$
-c_k \sim \mathcal{N}(\hat{c}_k,(0.25R_X)^2I)
-$$
+Suggested floor:
 
-and smoothness across cycles:
+```text
+log_radius_floor = 0.03
+radius_floor = 1e-3 * R_X
+```
 
-$$
-c_k-c_{k-1}\sim\mathcal{N}(0,(0.10R_X)^2I)
-$$
+The instantaneous radius should be anchored to `R_k`:
 
-If the recording has large drift, increase $0.10R_X$ to $0.20R_X$.
+```text
+log_r_t = log_R_k + h_r_t
+```
 
-### Cycle normal
+Start with either:
 
-Layer 1 may use a normalized unconstrained vector. Let $u_k\in\mathbb{R}^3$:
+```text
+r_t = R_k
+```
 
-$$
-n_k=\frac{u_k}{\lVert u_k\rVert}
-$$
+or a low-flexibility, zero-centered within-cycle deviation `h_r_t`.
 
-Initialize $\hat{n}_k$ from cycle-wise PCA. Use:
+### Normal hierarchy
 
-$$
-u_k\sim\mathcal{N}(\hat{n}_k,0.20^2I)
-$$
+Normals must remain unit vectors.
 
-Add angular smoothness. The literal prior was:
+Use tangent-plane deviations around the Layer 1 normal:
 
-$$
-\cos^{-1}\left(\left|n_k^\top n_{k-1}\right|\right)\sim\operatorname{HalfNormal}(0.10)
-$$
+```text
+Q_k = orthonormal tangent basis at n1_mean[k]
+delta_n[k] in R^2
+n_k = normalize(n1_mean[k] + Q_k @ delta_n[k])
+```
 
-In implementation, avoid the literal `arccos` potential because it has a gradient singularity near perfect alignment. Use the already implemented smooth small-angle proxy:
+Compute empirical angular variability from Layer 1 normal means. For example:
 
-$$
-\log p(n_k,n_{k-1}) \propto -\frac{1-|n_k^\top n_{k-1}|}{\sigma_n^2}
-$$
-
-with:
-
-$$
-\sigma_n = 0.10
-$$
-
-### Boundary direction
-
-Define:
-
-$$
-a_k=X(\tau_k)-c_k
-$$
-
-Do **not** project $a_k$ into the cycle plane in the coarse model. Project once in the instantaneous model.
-
-### Layer 1 outputs
-
-Layer 1 should return posterior summaries for:
-
-- $\tau_k$
-- $T_k$
-- $c_k$
-- $u_k$ and/or $n_k$
-- $a_k$
-- $\mu_\tau$
-- $\Sigma_\tau$ or $\sigma_\tau^{(x)}$
-- posterior angular SD for each $n_k$
-
-## Layer 2: instantaneous model
-
-Layer 2 uses Layer 1 posterior summaries as priors. This is a modular Bayesian handoff rather than a single joint model.
-
-### Uncertainty propagation
-
-Use a padding factor of $1.5$:
-
-$$
-\theta^{(2)}\sim\mathcal{N}\left(\mathbb{E}[\theta^{(1)}\mid X],\left(1.5\operatorname{SD}[\theta^{(1)}\mid X]\right)^2\right)
-$$
-
-For vectors:
-
-$$
-v^{(2)}\sim\mathcal{N}\left(\mathbb{E}[v^{(1)}\mid X],1.5^2\operatorname{Cov}[v^{(1)}\mid X]\right)
-$$
-
-If full covariance is inconvenient, use componentwise posterior SDs for ordinary Euclidean quantities such as center and boundary direction.
-
-Use uncertainty floors:
-
-$$
-\sigma_{\tau,k}^{(2)}=\max(1.5s_{\tau,k}^{(1)},0.01T_k)
-$$
-
-$$
-\sigma_{c,k}^{(2)}=\max(1.5s_{c,k}^{(1)},0.02R_X)
-$$
-
-For Layer 2 normals, do **not** use componentwise $u$ SD as the main uncertainty scale. Use Layer 1 angular posterior SD instead:
-
-$$
-\sigma_{\theta,k}^{(2)}=\max(1.5s_{\theta,k}^{(1)},0.03)
-$$
-
-where $s_{\theta,k}^{(1)}$ is the Layer 1 posterior angular SD for $n_k$.
-
-## Layer 2 normal parameterization: tangent-plane deviations
-
-The previous Layer 2 parameterization splined raw unconstrained 3D vectors and then normalized:
-
-$$
-u(t)=\operatorname{CubicSpline}(u_k)(t)
-$$
-
-$$
-n(t)=\frac{u(t)}{\lVert u(t)\rVert}
-$$
-
-This is fragile. If adjacent $u_k$ knots drift toward opposite signs or incompatible directions, the spline can pass near zero:
-
-$$
-\lVert u(t)\rVert \approx 0
-$$
-
-Then $u(t)/\lVert u(t)\rVert$ becomes arbitrary, producing localized but confident-looking normal artifacts.
-
-Replace this with tangent-plane normal deviations around the Layer 1 posterior mean normals.
-
-Let $m_j$ be the padded Layer 1 posterior mean normal at Layer 2 normal knot $j$. Ensure signs are aligned so adjacent $m_j$ satisfy:
-
-$$
-m_j^\top m_{j-1} > 0
-$$
-
-Construct a deterministic orthonormal tangent basis $Q_j\in\mathbb{R}^{3\times 2}$ such that:
-
-$$
-Q_j^\top Q_j=I
-$$
-
-$$
-Q_j^\top m_j=0
-$$
-
-Sample two-dimensional angular deviations:
-
-$$
-\delta_j\sim\mathcal{N}(0,(\sigma_{\theta,j}^{(2)})^2I_2)
-$$
-
-Then define Layer 2 normal knots by:
-
-$$
-\tilde{n}_j=m_j+Q_j\delta_j
-$$
-
-$$
-n_j^{(2)}=\frac{\tilde{n}_j}{\lVert\tilde{n}_j\rVert}
-$$
-
-This removes the meaningless radial degree of freedom in $u_j$ and makes the prior scale genuinely angular.
-
-Add Layer 2 normal smoothness across adjacent normal knots:
-
-$$
-\log p(n_j^{(2)},n_{j-1}^{(2)}) \propto -\frac{1-n_j^{(2)\top}n_{j-1}^{(2)}}{\sigma_{\Delta n}^2}
-$$
-
-Use:
-
-$$
-\sigma_{\Delta n}=0.05\text{ to }0.10
-$$
-
-Start with:
-
-$$
-\sigma_{\Delta n}=0.10
-$$
-
-Because signs are explicitly aligned, do not use absolute value in this Layer 2 smoothness term unless later evidence shows sign ambiguity has returned.
-
-For instantaneous normals, spline the normal knots themselves and then renormalize:
-
-$$
-\bar{n}(t)=\operatorname{CubicSpline}(\tau_j,n_j^{(2)})(t)
-$$
-
-$$
-n(t)=\frac{\bar{n}(t)}{\lVert\bar{n}(t)\rVert}
-$$
-
-This is still not a perfect geodesic spline on $S^2$, but it avoids the worst failure mode: raw unconstrained $u(t)$ passing through zero.
-
-## Layer 2 center and boundary direction splines
-
-Center remains an ordinary Euclidean spline:
-
-$$
-c(t)=\operatorname{CubicSpline}(\tau_j,c_j^{(2)})(t)
-$$
-
-Boundary direction remains an ordinary Euclidean spline:
-
-$$
-a(t)=\operatorname{CubicSpline}(\tau_j,a_j^{(2)})(t)
-$$
-
-Add a floor for boundary-direction uncertainty, which was missing in the first implementation:
-
-$$
-\sigma_{a,k}^{(2)}=\max(1.5s_{a,k}^{(1)},0.02R_X)
-$$
-
-## Boundary-anchored coordinate frame
-
-Define the in-plane x-axis by projecting $a(t)$ into the instantaneous plane:
-
-$$
-e_1(t)=\frac{(I-n(t)n(t)^\top)a(t)}{\left\lVert (I-n(t)n(t)^\top)a(t)\right\rVert}
-$$
+```text
+angle_sd = sd of adjacent-cycle angles between n1_mean[k] and n1_mean[k+1]
+```
 
 Then:
 
-$$
-e_2(t)=n(t)\times e_1(t)
-$$
+```text
+sigma_n_angle ~ HalfNormal(scale = max(angle_sd, normal_angle_floor))
+delta_n[k, d] ~ Normal(0, sigma_n_angle)
+```
 
-This fixes the in-plane gauge and avoids a separate free in-plane spin parameter.
+Suggested floor:
 
-## Layer 2 phase parameterization: satisfy boundaries by construction
+```text
+normal_angle_floor = 0.03 rad
+```
 
-The previous implementation used:
+The normal is fixed within cycle:
 
-$$
-\omega(t)=\exp(g(t))
-$$
+```text
+n(t) = n_k for tau_k <= t < tau_{k+1}
+```
 
-$$
-\phi_t=\phi_{t-1}+\omega_t\Delta t
-$$
+### Cycle origin / phase-zero direction hierarchy
 
-plus a tight soft boundary potential:
+The cycle origin `a_k` defines the in-plane phase-zero direction. It should represent the vector from the cycle center to the boundary / phase-zero point.
 
-$$
-\phi(\tau_k)-2\pi k\sim\mathcal{N}(0,0.15^2)
-$$
+Recommended prior mean:
 
-This creates difficult NUTS geometry because a small number of spline coefficients must satisfy several tight nonlinear cumulative constraints.
+```text
+a1_mean[k] = X(tau_k) - c1_mean[k]
+```
 
-Replace it with a boundary-normalized positive phase-speed model. Within each cycle, define a positive unnormalized speed:
+or an equivalent Layer 1 boundary-origin estimate that is explicitly tied to phase zero.
 
-$$
-s(t)=\exp(q(t))
-$$
+Start with a vector hierarchy:
 
-For $\tau_k\le t\le\tau_{k+1}$, define:
+```text
+empirical_sd_a[d] = sd across k of a1_mean[k, d]
+sigma_a[d] ~ HalfNormal(scale = max(empirical_sd_a[d], a_floor))
+a_k[d] ~ Normal(a1_mean[k, d], sigma_a[d])
+```
 
-$$
-\phi(t)=2\pi k+2\pi\frac{\int_{\tau_k}^{t}s(v)\,dv}{\int_{\tau_k}^{\tau_{k+1}}s(v)\,dv}
-$$
+Suggested floor:
 
-This guarantees:
+```text
+a_floor = 0.02 * R_X
+```
 
-$$
-\phi(\tau_k)=2\pi k
-$$
+Then construct the in-plane basis:
 
-$$
-\phi(\tau_{k+1})=2\pi(k+1)
-$$
+```text
+proj_a_k = a_k - n_k * dot(n_k, a_k)
+e1_k = proj_a_k / norm(proj_a_k)
+e2_k = cross(n_k, e1_k)
+```
 
-and phase is monotone because $s(t)>0$.
+Add a diagnostic warning or failure when `norm(proj_a_k) / norm(a_k)` is too small.
 
-In discrete implementation, for samples $i$ inside cycle $k$:
+A later alternative is an in-plane angular hierarchy around the Layer 1 origin direction, but do not start there unless the vector hierarchy fails.
 
-$$
-w_i=\exp(q_i)
-$$
+## Instantaneous variables
 
-$$
-S_{k,i}=\sum_{j\in k,\ j<i} w_j\Delta t
-$$
+### Phase
 
-$$
-S_{k,\mathrm{total}}=\sum_{j\in k}w_j\Delta t
-$$
+Start simple with linear phase inside each cycle:
 
-$$
-\phi_i=2\pi k+2\pi\frac{S_{k,i}}{S_{k,\mathrm{total}}}
-$$
+```text
+phi_t = 2*pi*k + 2*pi*(t - tau_k)/(tau_{k+1} - tau_k)
+```
 
-This removes the `phase_boundary` potential from Layer 2. A weak prior on $q(t)$ and smoothness of $q(t)$ controls within-cycle acceleration and deceleration.
+This phase is deterministic conditional on cycle boundaries. It should be monotone by construction.
 
-Use a spline or low-rank basis for $q(t)$, with mean-zero or weakly centered deviations so the normalization, not the absolute offset of $q(t)$, determines the cycle duration.
+After the cycle-fixed geometry model works, optional phase flexibility can be added as a cycle-local positive-speed model. Do not add that complexity in the first implementation.
 
-For example:
+### Radius
 
-$$
-q_j\sim\mathcal{N}(0,0.20^2)
-$$
+Initial implementation may use:
 
-and:
+```text
+r_t = R_k
+```
 
-$$
-q_j-q_{j-1}\sim\mathcal{N}(0,0.15^2)
-$$
+A next step can add low-flexibility within-cycle radius deviation:
 
-Because the per-cycle normalization removes the absolute scale of $s(t)$, avoid adding unidentified global offsets to $q(t)$ unless they are explicitly constrained.
+```text
+log_r_t = log_R_k + h_r_t
+h_r_t ~ smooth zero-centered within-cycle process
+```
 
-## Radius and perpendicular deviation
+For the fixed-plane synthetic test, radius should recover approximately 1.0.
 
-Radius is positive:
+### Perpendicular displacement
 
-$$
-r(t)=\exp(h_r(t))
-$$
+Use a zero-centered within-cycle process:
 
-Perpendicular deviation is unconstrained but should be smooth and zero-centered:
+```text
+z_t ~ smooth zero-centered process
+```
 
-$$
-z(t)=h_z(t)
-$$
+For the fixed-plane synthetic test, `z_t` should remain near zero.
 
-Continue to use smooth spline priors for $h_r(t)$ and $h_z(t)$.
+## Observation noise
 
-## Observation model
+Keep the existing `sigma_x` prior initially:
 
-The instantaneous observation model is:
+```text
+rho_x = sigma_x / R_X
+rho_x ~ LogNormal(log(0.03), 0.5)
+sigma_x = R_X * rho_x
+```
 
-$$
-X_t\sim\mathcal{N}\left(c(t)+e_1(t)r(t)\cos\phi(t)+e_2(t)r(t)\sin\phi(t)+n(t)z(t),\sigma_x^2I\right)
-$$
+If the cycle-fixed model still inflates `sigma_x`, inspect center, radius, z, phase, and residual decomposition before tightening the noise prior.
 
-Use:
+## Implementation targets
 
-$$
-\sigma_x=R_X\rho_x
-$$
+Add a new model path rather than overwriting the old one.
 
-$$
-\rho_x\sim\operatorname{LogNormal}(\log0.03,0.5^2)
-$$
+Suggested internal function:
 
-## Return values
+```text
+_fit_layer2_cycle_fixed_geometry(...)
+```
 
-Return three layers of output.
+Suggested public option later:
 
-### Estimates
+```text
+fit_bayesian_phase_coordinates(..., layer2_geometry="cycle_fixed")
+```
 
-Posterior mean or median values for practical analysis:
+It is acceptable to begin with an internal function and a debug script before wiring the public API.
 
-- cycle boundaries
-- cycle centers
-- cycle normals
-- boundary directions
-- instantaneous phase
-- instantaneous phase velocity
-- instantaneous center
-- instantaneous normal
-- $e_1(t)$ and $e_2(t)$
-- radius
-- perpendicular deviation
-- predicted trajectory
+## Required debug script
 
-### Uncertainty
+Create:
 
-Credible intervals or posterior SDs for key quantities.
+```text
+docs/debug/scripts/test_layer2_cycle_fixed.py
+```
 
-For normals, report at least:
+Use the same fixed-plane synthetic data as `test_layer2.py`.
 
-- angular SD around the posterior mean direction
-- raw mean resultant length or equivalent diagnostic showing whether the mean normal is stable before normalization
+Report:
 
-The mean resultant length diagnostic is important because normalizing a small posterior mean vector can produce a confident-looking but misleading direction.
+```text
+divergence count
+max treedepth count
+sigma_x mean/median/5%/95%
+R_k mean/median by cycle
+center norm by cycle
+normal cos_sim by cycle
+z_rms
+RMSE total
+RMSE normal
+RMSE cyclic
+RMSE tangential
+phase monotonicity
+frame orthonormality
+hierarchical scales: sigma_c, sigma_log_R, sigma_n_angle, sigma_a
+```
 
-### Bayesian report
+## Success criteria on fixed-plane synthetic data
 
-Optional full posterior object, such as an ArviZ `InferenceData`. Only retain this if `return_report=True`; otherwise compute summaries and discard heavy posterior draws.
+The first working version should aim for:
 
-## Diagnostics
+```text
+sigma_x near 0.02
+R_k near 1.0 for all cycles
+center norm small relative to radius
+normal cos_sim near 1.0
+z_rms small
+RMSE near observation noise
+few or no divergences
+no catastrophic chain split
+```
 
-### Hard failures
+If these do not hold, report the failing component rather than loosening thresholds.
 
-Boundary multimodality:
+## Non-goals for this branch
 
-- fail if two posterior modes each have mass greater than $0.20$ and are separated by more than $0.20T_k$.
+Do not implement within-cycle changing centers.
 
-Boundary cloud too large:
+Do not implement within-cycle changing normals.
 
-$$
-\rho_\tau=\frac{\sqrt{\operatorname{tr}(\Sigma_\tau)}}{R_X}
-$$
+Do not treat fixed-sigma or MAP initialization as the primary solution unless the cycle-fixed model still exhibits a sampler-only problem after the center/orbit confound has been removed.
 
-- warn if $\rho_\tau>0.25$.
-- fail if $\rho_\tau>0.40$.
-
-Projection failure:
-
-$$
-p_t=\left\lVert (I-n(t)n(t)^\top)a(t)\right\rVert
-$$
-
-- warn if $p_t/\lVert a(t)\rVert<0.20$.
-- fail if $p_t/\lVert a(t)\rVert<0.10$.
-
-### Warnings
-
-Normal dominated by prior:
-
-Warn if the posterior angular shift from the prior is less than $0.25$ of the prior angular SD and the posterior SD remains larger than $0.75$ of the prior SD.
-
-Low normal mean resultant length:
-
-Let $\bar{n}_{\mathrm{raw}}(t)$ be the unnormalized posterior mean of normal samples:
-
-$$
-\bar{n}_{\mathrm{raw}}(t)=\mathbb{E}[n(t)\mid X]
-$$
-
-Warn if:
-
-$$
-\lVert\bar{n}_{\mathrm{raw}}(t)\rVert < 0.80
-$$
-
-This catches cases where the normalized reported mean direction may be misleading.
-
-Large perpendicular deviation:
-
-$$
-\rho_z(t)=\frac{|z(t)|}{r(t)+\epsilon}
-$$
-
-- warn if $\operatorname{median}_t\rho_z(t)>0.25$.
-- warn strongly if $\operatorname{median}_t\rho_z(t)>0.50$.
-- warn if more than 10% of samples have $\rho_z(t)>0.50$.
-
-Center drift:
-
-$$
-D_c=\operatorname{range}_t\lVert c(t)-\bar{c}\rVert
-$$
-
-- warn if $D_c/R_X>0.25$.
-- warn strongly if $D_c/R_X>0.50$.
-
-Phase velocity degeneracy:
-
-$$
-\omega_{95}/\omega_5
-$$
-
-- warn if $\omega_{95}/\omega_5>3$.
-- warn strongly if $\omega_{95}/\omega_5>5$.
-
-Observation noise:
-
-- warn if $\sigma_x/R_X>0.10$.
-- warn strongly if $\sigma_x/R_X>0.25$.
-
-Phase monotonicity should be guaranteed by construction, but still include a sanity check.
-
-Divergences and treedepth:
-
-- hard-fail if post-tuning divergences are nonzero in final test configurations.
-- warn if any chain reaches maximum treedepth.
-- report `r_hat` and ESS summaries for final Bayesian reports.
-
-## Implementation order for the current reparameterization pass
-
-1. Add tangent-basis utilities for normals.
-2. Replace Layer 2 `u2` raw-vector spline with tangent-plane normal deviations.
-3. Add Layer 2 normal-knot smoothness.
-4. Add a floor for Layer 2 boundary-direction prior SD.
-5. Add normal mean-resultant-length uncertainty diagnostic.
-6. Replace the soft `phase_boundary` potential with boundary-normalized positive phase by construction.
-7. Re-run the existing debug scripts.
-8. Only then tune NUTS settings such as `target_accept` or treedepth.
-
-The current best hypothesis is that the visible normal artifact is primarily caused by the old Layer 2 normal parameterization, while the divergences are primarily driven by the old soft-boundary phase model. The reparameterization should address both rather than treating the problem as mere sampler tuning.
+Do not delete the old instantaneous model from code in the first pass. Keep it available as a separate experimental path.
