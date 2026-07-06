@@ -8,7 +8,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from phase_coordinates import hilbert_phase, cycle_by_cycle_pca_coordinates
+from phase_coordinates import (
+    hilbert_phase,
+    fit_pca_phase_coordinates,
+    reconstruct_phase_coordinates,
+    SAMPLE_COLUMNS,
+    CYCLE_COLUMNS,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -302,44 +308,54 @@ class TestHilbertPhase:
 
 
 # ---------------------------------------------------------------------------
-# cycle_by_cycle_pca_coordinates
+# TestFitPcaPhaseCoordinates
 # ---------------------------------------------------------------------------
 
-class TestCycleByCyclePcaCoordinates:
-    """Tests for cycle_by_cycle_pca_coordinates."""
+class TestFitPcaPhaseCoordinates:
+    """Tests for fit_pca_phase_coordinates (new public API)."""
 
     # -- basic smoke tests --
 
-    def test_returns_dataframe_and_dict(self):
+    def test_returns_three_tuple(self):
         X, phase_true, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        assert isinstance(coords, pd.DataFrame)
-        assert isinstance(models, dict)
+        result = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert len(result) == 3
 
-    def test_output_columns(self):
+    def test_returns_dataframe_dict_tuple(self):
+        X, phase_true, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert isinstance(samples, pd.DataFrame)
+        assert isinstance(cycles, pd.DataFrame)
+        assert isinstance(details, dict)
+
+    def test_sample_columns(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        expected = {
-            "cycle", "phase", "phase_wrapped", "phase_in_cycle", "amp_hilbert",
-            "pc1_local", "pc2_local", "pc3_local",
-            "theta_local", "theta_local_wrapped",
-            "radius_local", "perp_local",
-        }
-        assert expected.issubset(set(coords.columns))
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert list(samples.columns) == SAMPLE_COLUMNS
+
+    def test_cycle_columns(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert list(cycles.columns) == CYCLE_COLUMNS
 
     def test_output_length(self):
-        n_time = 500
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        assert len(coords) == len(X)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert len(samples) == len(X)
+
+    def test_details_algorithm_key(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        _, _, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert details["algorithm"] == "pca"
+        assert "models" in details
 
     # -- input variants --
 
     def test_dataframe_input(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=4, samples_per_cycle=80)
         df = pd.DataFrame(X, columns=["x", "y", "z"])
-        coords, models = cycle_by_cycle_pca_coordinates(df, phase=phase_true)
-        assert len(coords) == len(df)
+        samples, cycles, details = fit_pca_phase_coordinates(df, phase=phase_true)
+        assert len(samples) == len(df)
 
     def test_dataframe_with_columns_kwarg(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=4, samples_per_cycle=80)
@@ -347,25 +363,25 @@ class TestCycleByCyclePcaCoordinates:
             np.hstack([X, np.ones((len(X), 1))]),
             columns=["x", "y", "z", "extra"],
         )
-        coords, models = cycle_by_cycle_pca_coordinates(
+        samples, cycles, details = fit_pca_phase_coordinates(
             df, phase=phase_true, columns=["x", "y", "z"]
         )
-        assert len(coords) == len(df)
+        assert len(samples) == len(df)
 
     def test_with_ref_signal_and_fs(self):
         X, _, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100, noise_std=0.01)
         ref = X[:, 0]  # use x-coordinate as reference signal
-        coords, models = cycle_by_cycle_pca_coordinates(
-            X, ref_signal=ref, fs=fs, f_range=(0.5, 2.0)
+        samples, cycles, details = fit_pca_phase_coordinates(
+            X, ref_signal=ref, sampling_rate_hz=fs, f_range=(0.5, 2.0)
         )
-        assert len(coords) == len(X)
-        assert len(models) >= 4  # should detect most cycles
+        assert len(samples) == len(X)
+        assert len(cycles) >= 4  # should detect most cycles
 
     # -- error conditions --
 
     def test_raises_on_1d_input(self):
         with pytest.raises(ValueError, match="shape"):
-            cycle_by_cycle_pca_coordinates(
+            fit_pca_phase_coordinates(
                 np.arange(100, dtype=float),
                 phase=np.linspace(0, 10 * np.pi, 100),
             )
@@ -373,39 +389,39 @@ class TestCycleByCyclePcaCoordinates:
     def test_raises_on_fewer_than_3_features(self):
         X = np.random.default_rng(0).standard_normal((100, 2))
         with pytest.raises(ValueError, match="3 features"):
-            cycle_by_cycle_pca_coordinates(
+            fit_pca_phase_coordinates(
                 X, phase=np.linspace(0, 10 * np.pi, 100)
             )
 
     def test_raises_without_phase_info(self):
         X, _, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
         with pytest.raises(ValueError, match="phase"):
-            cycle_by_cycle_pca_coordinates(X)
+            fit_pca_phase_coordinates(X)
 
     def test_raises_on_phase_length_mismatch(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
         with pytest.raises(ValueError, match="length"):
-            cycle_by_cycle_pca_coordinates(X, phase=phase_true[:-10])
+            fit_pca_phase_coordinates(X, phase=phase_true[:-10])
 
     def test_raises_on_2d_phase(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
         phase_2d = np.tile(phase_true, (2, 1))  # shape (2, n_time)
         with pytest.raises(ValueError, match="1-D"):
-            cycle_by_cycle_pca_coordinates(X, phase=phase_2d)
+            fit_pca_phase_coordinates(X, phase=phase_2d)
 
     def test_raises_on_phase_with_nan(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
         phase_nan = phase_true.copy()
         phase_nan[10] = np.nan
         with pytest.raises(ValueError, match="non-finite"):
-            cycle_by_cycle_pca_coordinates(X, phase=phase_nan)
+            fit_pca_phase_coordinates(X, phase=phase_nan)
 
     def test_raises_on_phase_with_inf(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=80)
         phase_inf = phase_true.copy()
         phase_inf[50] = np.inf
         with pytest.raises(ValueError, match="non-finite"):
-            cycle_by_cycle_pca_coordinates(X, phase=phase_inf)
+            fit_pca_phase_coordinates(X, phase=phase_inf)
 
     # -- cycle detection --
 
@@ -414,129 +430,88 @@ class TestCycleByCyclePcaCoordinates:
         X, phase_true, _ = _make_cyclic_3d(
             n_cycles=n_cycles, samples_per_cycle=100, noise_std=0.02
         )
-        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
         # cycle ids should span from 0 to n_cycles-1 (approximately)
-        cycle_ids = coords["cycle"].unique()
+        cycle_ids = samples["cycle"].unique()
         assert len(cycle_ids) <= n_cycles + 1
-        assert len(models) >= n_cycles - 1  # allow one partial cycle at edges
+        assert len(cycles) >= n_cycles - 1  # allow one partial cycle at edges
 
     def test_phase_in_cycle_range(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        assert coords["phase_in_cycle"].min() >= 0
-        assert coords["phase_in_cycle"].max() < 2 * np.pi + 1e-10
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert samples["phase_in_cycle"].min() >= 0
+        assert samples["phase_in_cycle"].max() < 2 * np.pi + 1e-10
 
     def test_amp_hilbert_nan_when_phase_provided(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        assert coords["amp_hilbert"].isna().all()
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert np.all(np.isnan(details["amp_hilbert"]))
 
     def test_amp_hilbert_finite_when_ref_signal_provided(self):
         X, _, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100, noise_std=0.01)
-        coords, _ = cycle_by_cycle_pca_coordinates(
-            X, ref_signal=X[:, 0], fs=fs, f_range=(0.5, 2.0)
+        samples, cycles, details = fit_pca_phase_coordinates(
+            X, ref_signal=X[:, 0], sampling_rate_hz=fs, f_range=(0.5, 2.0)
         )
-        assert coords["amp_hilbert"].notna().any()
+        assert np.any(np.isfinite(details["amp_hilbert"]))
 
     # -- geometric validity --
 
     def test_radius_non_negative(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        valid = coords["radius_local"].dropna()
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        valid = samples["radius"].dropna()
         assert (valid >= 0).all()
 
-    def test_radius_equals_hypot_of_pc1_pc2(self):
+    def test_radius_equals_hypot_of_u_v(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        mask = coords["radius_local"].notna()
-        r_computed = np.hypot(coords.loc[mask, "pc1_local"], coords.loc[mask, "pc2_local"])
-        np.testing.assert_allclose(coords.loc[mask, "radius_local"].to_numpy(), r_computed, atol=1e-12)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        mask = samples["radius"].notna()
+        r_computed = np.hypot(samples.loc[mask, "u"], samples.loc[mask, "v"])
+        np.testing.assert_allclose(samples.loc[mask, "radius"].to_numpy(), r_computed, atol=1e-12)
 
     def test_theta_wrapped_in_range(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        valid = coords["theta_local_wrapped"].dropna()
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        valid = samples["theta_wrapped"].dropna()
         assert (valid >= -np.pi - 1e-10).all()
         assert (valid <= np.pi + 1e-10).all()
 
-    def test_perp_local_equals_pc3(self):
-        X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        mask = coords["perp_local"].notna()
-        np.testing.assert_allclose(
-            coords.loc[mask, "perp_local"].to_numpy(),
-            coords.loc[mask, "pc3_local"].to_numpy(),
-            atol=1e-12,
-        )
-
     # -- data recovery --
 
-    def test_data_recovery(self):
+    def test_data_recovery_via_reconstruct(self):
         """
-        Reconstruct X from the per-cycle PCA models using iloc (positional
-        indexing) and verify it matches the original data to within numerical
-        precision.
+        Reconstruct X via reconstruct_phase_coordinates and verify near-exact
+        recovery for zero-noise 3-D data.
         """
         X, phase_true, _ = _make_cyclic_3d(
             n_cycles=5, samples_per_cycle=100, noise_std=0.0
         )
-        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-
-        X_rec = np.full_like(X, np.nan)
-        for cyc, model in models.items():
-            idx = model["indices"]  # positional integer indices
-            center = model["center"]
-            comps = model["components"]  # (3, n_features)
-            p1 = coords.iloc[idx]["pc1_local"].to_numpy()
-            p2 = coords.iloc[idx]["pc2_local"].to_numpy()
-            p3 = coords.iloc[idx]["pc3_local"].to_numpy()
-            X_rec[idx] = (
-                p1[:, None] * comps[0]
-                + p2[:, None] * comps[1]
-                + p3[:, None] * comps[2]
-                + center
-            )
-
-        valid = ~np.isnan(X_rec).any(axis=1)
-        np.testing.assert_allclose(X[valid], X_rec[valid], atol=1e-10)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        X_hat = reconstruct_phase_coordinates(samples, cycles)
+        valid = ~np.isnan(X_hat[:, 0])
+        assert valid.sum() > 0
+        np.testing.assert_allclose(X[valid], X_hat[valid], atol=1e-10)
 
     def test_data_recovery_non_default_index(self):
         """
-        Reconstruction via iloc works correctly even when the DataFrame has a
+        Reconstruction works correctly even when the DataFrame has a
         non-default (e.g. time-based) index.
         """
         X, phase_true, _ = _make_cyclic_3d(
             n_cycles=5, samples_per_cycle=100, noise_std=0.0
         )
         n_time = len(X)
-        # Non-default float time index
         time_index = pd.Index(np.arange(n_time) / 100.0, name="time_s")
         df = pd.DataFrame(X, columns=["x", "y", "z"], index=time_index)
 
-        coords, models = cycle_by_cycle_pca_coordinates(df, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(df, phase=phase_true)
 
-        # The coords DataFrame inherits the non-default index.
-        assert (coords.index == time_index).all()
+        # The samples DataFrame inherits the non-default index.
+        assert (samples.index == time_index).all()
 
-        X_rec = np.full_like(X, np.nan)
-        for cyc, model in models.items():
-            idx = model["indices"]  # always positional ints
-            center = model["center"]
-            comps = model["components"]
-            # Must use iloc for positional access, not loc
-            p1 = coords.iloc[idx]["pc1_local"].to_numpy()
-            p2 = coords.iloc[idx]["pc2_local"].to_numpy()
-            p3 = coords.iloc[idx]["pc3_local"].to_numpy()
-            X_rec[idx] = (
-                p1[:, None] * comps[0]
-                + p2[:, None] * comps[1]
-                + p3[:, None] * comps[2]
-                + center
-            )
-
-        valid = ~np.isnan(X_rec).any(axis=1)
-        np.testing.assert_allclose(X[valid], X_rec[valid], atol=1e-10)
+        X_hat = reconstruct_phase_coordinates(samples, cycles)
+        valid = ~np.isnan(X_hat[:, 0])
+        np.testing.assert_allclose(X[valid], X_hat[valid], atol=1e-10)
 
     def test_data_recovery_approximate_for_high_dimensional_input(self):
         """
@@ -550,16 +525,17 @@ class TestCycleByCyclePcaCoordinates:
         # 5D data where all 5 dimensions carry independent signal
         X = rng.standard_normal((n_time, 5))
 
-        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        models = details["models"]
 
         X_rec = np.full_like(X, np.nan)
         for cyc, model in models.items():
             idx = model["indices"]
             center = model["center"]
             comps = model["components"]  # shape (3, 5)
-            p1 = coords.iloc[idx]["pc1_local"].to_numpy()
-            p2 = coords.iloc[idx]["pc2_local"].to_numpy()
-            p3 = coords.iloc[idx]["pc3_local"].to_numpy()
+            p1 = samples.iloc[idx]["u"].to_numpy()
+            p2 = samples.iloc[idx]["v"].to_numpy()
+            p3 = samples.iloc[idx]["perp"].to_numpy()
             X_rec[idx] = (
                 p1[:, None] * comps[0]
                 + p2[:, None] * comps[1]
@@ -569,7 +545,6 @@ class TestCycleByCyclePcaCoordinates:
 
         valid = ~np.isnan(X_rec).any(axis=1)
         max_error = np.abs(X[valid] - X_rec[valid]).max()
-        # Reconstruction from 3 of 5 PCs is lossy for isotropic noise data.
         assert max_error > 1e-6, (
             f"Expected approximate (lossy) reconstruction for 5D data, "
             f"but max error was only {max_error:.2e}"
@@ -584,8 +559,8 @@ class TestCycleByCyclePcaCoordinates:
         X, phase_true, _ = _make_cyclic_3d(
             n_cycles=5, samples_per_cycle=200, noise_std=0.01, radius=true_radius
         )
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        median_radius = coords["radius_local"].median()
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        median_radius = samples["radius"].median()
         assert abs(median_radius - true_radius) < 0.1, (
             f"Median radius {median_radius:.3f} far from true {true_radius}"
         )
@@ -598,9 +573,9 @@ class TestCycleByCyclePcaCoordinates:
         X, phase_true, _ = _make_cyclic_3d(
             n_cycles=5, samples_per_cycle=200, noise_std=0.02
         )
-        coords, _ = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
-        rms_perp = np.sqrt((coords["perp_local"].dropna() ** 2).mean())
-        rms_radius = np.sqrt((coords["radius_local"].dropna() ** 2).mean())
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        rms_perp = np.sqrt((samples["perp"].dropna() ** 2).mean())
+        rms_radius = np.sqrt((samples["radius"].dropna() ** 2).mean())
         assert rms_perp < 0.5 * rms_radius, (
             f"perp RMS {rms_perp:.4f} not small relative to radius RMS {rms_radius:.4f}"
         )
@@ -610,8 +585,7 @@ class TestCycleByCyclePcaCoordinates:
     def test_changing_planes_normals_actually_vary(self):
         """
         _make_changing_planes must produce true normals that genuinely differ
-        across cycles. This guards against the bug where rotating around z only
-        left every normal at [0, 0, 1].
+        across cycles.
         """
         _, _, true_normals = _make_changing_planes(n_cycles=6, samples_per_cycle=120)
         normals = np.array(true_normals)
@@ -624,15 +598,12 @@ class TestCycleByCyclePcaCoordinates:
         """
         When each cycle lies in a different plane, the fitted local PCA normal
         for that cycle should be close to the true plane normal.
-
-        The plane normal is components[2] (the PC3 axis = the axis with
-        smallest variance, i.e. perpendicular to the plane). Alignment is
-        checked up to sign: abs(dot(fitted_normal, true_normal)) ~ 1.
         """
         X, phase_true, true_normals = _make_changing_planes(
             n_cycles=6, samples_per_cycle=120, noise_std=0.01
         )
-        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        models = details["models"]
 
         cycle_ids = sorted(models.keys())
         for cyc in cycle_ids:
@@ -647,17 +618,18 @@ class TestCycleByCyclePcaCoordinates:
 
     def test_perp_small_for_each_cycle_in_changing_planes(self):
         """
-        Even when each cycle lies in a different plane, perp_local should be
+        Even when each cycle lies in a different plane, perp should be
         small for near-planar cycle data.
         """
         X, phase_true, _ = _make_changing_planes(
             n_cycles=6, samples_per_cycle=120, noise_std=0.01
         )
-        coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        models = details["models"]
 
         for cyc, m in models.items():
             idx = m["indices"]
-            perp = coords.iloc[idx]["perp_local"].to_numpy()
+            perp = samples.iloc[idx]["perp"].to_numpy()
             rms_perp = np.sqrt(np.mean(perp ** 2))
             assert rms_perp < 0.1, (
                 f"Cycle {cyc}: perp RMS {rms_perp:.4f} too large for near-planar data"
@@ -667,7 +639,8 @@ class TestCycleByCyclePcaCoordinates:
 
     def test_models_keys(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        _, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        models = details["models"]
         for cyc, m in models.items():
             assert isinstance(cyc, int)
             assert "pca" in m
@@ -678,13 +651,15 @@ class TestCycleByCyclePcaCoordinates:
 
     def test_models_components_shape(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        _, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        models = details["models"]
         for m in models.values():
             assert m["components"].shape == (3, 3)
 
     def test_models_explained_variance_sums_to_at_most_one(self):
         X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
-        _, models = cycle_by_cycle_pca_coordinates(X, phase=phase_true)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        models = details["models"]
         for m in models.values():
             total_var = m["explained_variance_ratio"].sum()
             assert total_var <= 1.0 + 1e-10
@@ -697,7 +672,112 @@ class TestCycleByCyclePcaCoordinates:
         and models should be empty.
         """
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=50)
-        _, models = cycle_by_cycle_pca_coordinates(
+        samples, cycles, details = fit_pca_phase_coordinates(
             X, phase=phase_true, min_samples_per_cycle=1000
         )
-        assert len(models) == 0
+        assert len(details["models"]) == 0
+        assert len(cycles) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestPublicContract
+# ---------------------------------------------------------------------------
+
+class TestPublicContract:
+    def _make_tilted_circle(self, n=300, noise=0.02):
+        t = np.linspace(0, 6 * np.pi, n)
+        tilt = np.pi / 6
+        X = np.column_stack([
+            np.cos(t),
+            np.sin(t) * np.cos(tilt),
+            np.sin(t) * np.sin(tilt),
+        ]) + np.random.default_rng(0).normal(0, noise, (n, 3))
+        phase = t.copy()
+        return X, phase
+
+    def test_pca_returns_tuple3(self):
+        X, phase = self._make_tilted_circle()
+        result = fit_pca_phase_coordinates(X, phase=phase)
+        assert len(result) == 3
+
+    def test_pca_sample_columns(self):
+        X, phase = self._make_tilted_circle()
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
+        assert list(samples.columns) == SAMPLE_COLUMNS
+
+    def test_pca_cycle_columns(self):
+        X, phase = self._make_tilted_circle()
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
+        assert list(cycles.columns) == CYCLE_COLUMNS
+
+    def test_pca_details_algorithm(self):
+        X, phase = self._make_tilted_circle()
+        _, _, details = fit_pca_phase_coordinates(X, phase=phase)
+        assert details["algorithm"] == "pca"
+        assert "models" in details
+
+    def test_reconstruct_pca_near_exact(self):
+        X, phase = self._make_tilted_circle(noise=0.0)
+        samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
+        X_hat = reconstruct_phase_coordinates(samples, cycles)
+        fitted_mask = ~np.isnan(X_hat[:, 0])
+        assert fitted_mask.sum() > 0
+        np.testing.assert_allclose(X_hat[fitted_mask], X[fitted_mask], atol=1e-10)
+
+    def test_sample_columns_identical_schema(self):
+        """Both algorithms produce samples with the same column names."""
+        from phase_coordinates import SAMPLE_COLUMNS as SC
+        X, phase = self._make_tilted_circle()
+        samples, _, _ = fit_pca_phase_coordinates(X, phase=phase)
+        assert list(samples.columns) == SC
+
+    def test_cycle_columns_identical_schema(self):
+        from phase_coordinates import CYCLE_COLUMNS as CC
+        X, phase = self._make_tilted_circle()
+        _, cycles, _ = fit_pca_phase_coordinates(X, phase=phase)
+        assert list(cycles.columns) == CC
+
+    def test_bayesian_import_without_pymc(self):
+        """Package imports cleanly even without PyMC."""
+        import phase_coordinates
+        assert hasattr(phase_coordinates, 'fit_pca_phase_coordinates')
+
+    def test_bayesian_clear_error_without_deps(self):
+        """fit_bayesian_phase_coordinates raises ImportError if PyMC missing."""
+        try:
+            import pymc  # noqa
+            pytest.skip("PyMC is installed; skip this test")
+        except ImportError:
+            pass
+        from phase_coordinates import fit_bayesian_phase_coordinates
+        X, _ = self._make_tilted_circle()
+        with pytest.raises(ImportError):
+            fit_bayesian_phase_coordinates(X, sampling_rate_hz=100.0)
+
+    @pytest.mark.slow
+    def test_bayesian_smoke(self):
+        """Basic smoke test for Bayesian fit."""
+        pytest.importorskip("pymc")
+        from phase_coordinates import fit_bayesian_phase_coordinates, reconstruct_phase_coordinates
+        rng = np.random.default_rng(0)
+        fs = 100.0
+        n_per_cycle = 100
+        n_cycles = 4
+        n = n_per_cycle * n_cycles
+        t = np.arange(n) / fs
+        tilt = np.pi / 6
+        X = np.column_stack([
+            np.cos(2 * np.pi * t),
+            np.sin(2 * np.pi * t) * np.cos(tilt),
+            np.sin(2 * np.pi * t) * np.sin(tilt),
+        ])
+        X += rng.normal(0, 0.02, X.shape)
+        samples, cycles, details = fit_bayesian_phase_coordinates(
+            X, sampling_rate_hz=fs, draws=100, tune=100, chains=2, random_seed=0
+        )
+        assert list(samples.columns) == SAMPLE_COLUMNS
+        assert list(cycles.columns) == CYCLE_COLUMNS
+        assert details["algorithm"] == "bayesian"
+        assert "diagnostics" in details
+        X_hat = reconstruct_phase_coordinates(samples, cycles)
+        assert X_hat.shape == X.shape

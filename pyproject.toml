@@ -22,6 +22,10 @@ dev = [
     "jupyter",
     "matplotlib",
 ]
+bayes = [
+    "pymc",
+    "arviz",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -29,3 +33,6 @@ include = ["phase_coordinates*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (run with -m slow or deselect with -m 'not slow')",
+]

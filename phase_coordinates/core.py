@@ -25,6 +25,52 @@ _PHASE_JUMP_THRESHOLD = -0.5
 # beating signals (which produce π jumps at amplitude nulls, ~0.4%).
 _NON_MONOTONIC_THRESHOLD = 0.003
 
+# ---------------------------------------------------------------------------
+# Shared output schema constants
+# ---------------------------------------------------------------------------
+
+SAMPLE_COLUMNS = [
+    "sample_index",
+    "time",
+    "cycle",
+    "phase",
+    "phase_in_cycle",
+    "u",
+    "v",
+    "radius",
+    "theta",
+    "theta_wrapped",
+    "perp",
+]
+
+CYCLE_COLUMNS = [
+    "cycle",
+    "sample_start",
+    "sample_stop",
+    "time_start",
+    "time_stop",
+    "time_quarter",
+    "duration",
+    "center_x",
+    "center_y",
+    "center_z",
+    "e1_x",
+    "e1_y",
+    "e1_z",
+    "e2_x",
+    "e2_y",
+    "e2_z",
+    "normal_x",
+    "normal_y",
+    "normal_z",
+    "radius_mean",
+    "radius_sd",
+    "perp_mean",
+    "perp_sd",
+    "n_samples",
+    "fit_ok",
+]
+
 
 def hilbert_phase(ref_signal, fs, f_range):
     """
@@ -137,11 +183,12 @@ def hilbert_phase(ref_signal, fs, f_range):
     return phase_unwrapped, phase_wrapped, np.abs(analytic)
 
 
-def cycle_by_cycle_pca_coordinates(
+def fit_pca_phase_coordinates(
     X,
-    ref_signal=None,
+    *,
     phase=None,
-    fs=None,
+    ref_signal=None,
+    sampling_rate_hz=None,
     f_range=None,
     columns=None,
     min_samples_per_cycle=10,
@@ -154,38 +201,18 @@ def cycle_by_cycle_pca_coordinates(
     "phase plane" and the third component captures deviation perpendicular
     to that plane.
 
-    .. note::
-        **Cycle anchoring**: Cycles are defined from ``phase - phase[0]``.
-        Cycle boundaries are therefore phase-based and anchored to the first
-        sample of the recording, not to any external behavioural event (such
-        as heel strike, peak flexion, or movement onset).  Users who need
-        event-anchored cycles should supply a ``phase`` variable that is
-        itself anchored to that event.
-
-    .. note::
-        **Recommended phase coordinate**: ``phase_in_cycle`` is the primary
-        timing/phase coordinate to use for cross-cycle alignment and
-        averaging. It is derived directly from the input phase estimate and
-        is consistent across cycles.
-
-        ``theta_local`` is the geometric angle in the local PCA plane and is
-        useful for describing within-cycle geometry. However, it should be
-        treated cautiously across cycles: because PCA axes can rotate, flip
-        signs, or swap when PC1/PC2 variances are similar, ``theta_local``
-        may be discontinuous or inconsistent between cycles.
-
     Parameters
     ----------
     X : array-like or pandas.DataFrame, shape (n_time, n_features)
         Multivariate movement data, e.g. x/y/z marker positions.
         Requires at least 3 features.
+    phase : array-like, optional
+        Precomputed *unwrapped* phase in radians. When supplied,
+        ``ref_signal``, ``sampling_rate_hz``, and ``f_range`` are not needed.
     ref_signal : array-like, optional
         Scalar signal used to estimate Hilbert phase (e.g. one joint angle
         or one marker coordinate). Required when ``phase`` is not supplied.
-    phase : array-like, optional
-        Precomputed *unwrapped* phase in radians. When supplied,
-        ``ref_signal``, ``fs``, and ``f_range`` are not needed.
-    fs : float, optional
+    sampling_rate_hz : float, optional
         Sampling rate in Hz. Required when ``ref_signal`` is used.
     f_range : tuple of float, optional
         Bandpass range for Hilbert-phase estimation, e.g. ``(0.5, 3.0)``.
@@ -198,70 +225,21 @@ def cycle_by_cycle_pca_coordinates(
 
     Returns
     -------
-    coords : pandas.DataFrame
-        One row per time point. Columns:
-
-        ``cycle``
-            Integer cycle index (floor of unwrapped phase / 2π).
-        ``phase``
-            Unwrapped phase in radians.
-        ``phase_wrapped``
-            Phase wrapped to ``[-π, π]``.
-        ``phase_in_cycle``
-            **Primary phase coordinate.** Phase within the current cycle
-            (range ``[0, 2π)``). Use this for cross-cycle alignment and
-            averaging.
-        ``amp_hilbert``
-            Hilbert amplitude (``NaN`` when phase is supplied directly).
-        ``pc1_local``
-            Score along the first local principal component.
-        ``pc2_local``
-            Score along the second local principal component.
-        ``pc3_local``
-            Score along the third local principal component.
-        ``theta_local``
-            Unwrapped angle in the local PCA plane (radians). Useful for
-            within-cycle geometric description, but may be inconsistent
-            across cycles if PCA axes rotate or flip between cycles.
-        ``theta_local_wrapped``
-            ``theta_local`` wrapped to ``[-π, π]``.
-        ``radius_local``
-            Radius in the local PCA plane (Euclidean distance from the
-            cycle centre in the pc1–pc2 plane).
-        ``perp_local``
-            Signed deviation perpendicular to the local PCA plane (pc3
-            score).
-
-    models : dict
-        Keyed by integer cycle index. Each value is a dict with:
-
-        ``pca``
-            Fitted :class:`sklearn.decomposition.PCA` object.
-        ``center``
-            Mean position of the cycle data (shape ``(n_features,)``).
-        ``components``
-            Sign-aligned PCA components (shape ``(3, n_features)``).
-        ``explained_variance_ratio``
-            Explained variance ratio for each component.
-        ``indices``
-            Integer *positional* indices (0-based) of the time points
-            belonging to this cycle in the original array/DataFrame.
-
-    Notes
-    -----
-    **Reconstruction accuracy**: for 3-feature input, reconstruction from
-    ``(pc1_local, pc2_local, pc3_local)`` via the per-cycle ``center`` and
-    ``components`` is exact (up to floating-point precision). For input with
-    more than 3 features, only 3 principal components are retained, so
-    reconstruction is generally approximate. The reconstruction error is
-    small only when the data are locally near rank-3 within each cycle.
+    samples : pandas.DataFrame
+        One row per time point. Columns = SAMPLE_COLUMNS.
+    cycles : pandas.DataFrame
+        One row per fitted cycle. Columns = CYCLE_COLUMNS.
+    details : dict
+        Algorithm-specific information including the per-cycle PCA models.
     """
     # ---- input handling ----
     if isinstance(X, pd.DataFrame):
         index = X.index
-        X_arr = X[columns].to_numpy(dtype=float) if columns else X.to_numpy(dtype=float)
+        columns_used = columns if columns else list(X.columns)
+        X_arr = X[columns_used].to_numpy(dtype=float) if columns else X.to_numpy(dtype=float)
     else:
         index = None
+        columns_used = columns
         X_arr = np.asarray(X, dtype=float)
 
     if X_arr.ndim != 2:
@@ -274,17 +252,19 @@ def cycle_by_cycle_pca_coordinates(
     n_features = X_arr.shape[1]
 
     # ---- get phase ----
+    phase_source = "provided"
     if phase is None:
-        if ref_signal is None or fs is None or f_range is None:
+        if ref_signal is None or sampling_rate_hz is None or f_range is None:
             raise ValueError(
-                "Provide either phase directly, or provide ref_signal, fs, and f_range."
+                "Provide either phase directly, or provide ref_signal, sampling_rate_hz, and f_range."
             )
 
         phase, phase_wrapped, amp_hilbert = hilbert_phase(
             ref_signal=ref_signal,
-            fs=fs,
+            fs=sampling_rate_hz,
             f_range=f_range,
         )
+        phase_source = "hilbert"
     else:
         phase = np.asarray(phase, dtype=float)
         if phase.ndim != 1:
@@ -383,22 +363,203 @@ def cycle_by_cycle_pca_coordinates(
             "indices": idx_valid,
         }
 
-    coords = pd.DataFrame(
+    # ---- build samples DataFrame ----
+    sample_index = np.arange(n_time)
+    if sampling_rate_hz is not None:
+        time_arr = sample_index / float(sampling_rate_hz)
+    else:
+        time_arr = np.full(n_time, np.nan)
+
+    samples = pd.DataFrame(
         {
+            "sample_index": sample_index,
+            "time": time_arr,
             "cycle": cycle_id,
             "phase": phase,
-            "phase_wrapped": phase_wrapped,
             "phase_in_cycle": phase_in_cycle,
-            "amp_hilbert": amp_hilbert,
-            "pc1_local": pc1,
-            "pc2_local": pc2,
-            "pc3_local": pc3,
-            "theta_local": theta_local,
-            "theta_local_wrapped": theta_local_wrapped,
-            "radius_local": radius_local,
-            "perp_local": perp_local,
+            "u": pc1,
+            "v": pc2,
+            "radius": radius_local,
+            "theta": theta_local,
+            "theta_wrapped": theta_local_wrapped,
+            "perp": perp_local,
         },
         index=index,
     )
 
+    # ---- build cycles DataFrame ----
+    cycle_rows = []
+    for cyc_k, m in models.items():
+        idx_k = m["indices"]
+        s_start = int(idx_k.min())
+        s_stop = int(idx_k.max()) + 1
+
+        if sampling_rate_hz is not None:
+            fs = float(sampling_rate_hz)
+            t_start = s_start / fs
+            t_stop = s_stop / fs
+            duration = t_stop - t_start
+            t_quarter = t_start + 0.25 * duration
+        else:
+            t_start = np.nan
+            t_stop = np.nan
+            duration = np.nan
+            t_quarter = np.nan
+
+        center = m["center"]
+        comps = m["components"]
+
+        def _get_vec3(arr, row):
+            if len(arr) > row and len(arr[row]) >= 3:
+                return arr[row][:3]
+            v = np.zeros(3)
+            if len(arr) > row:
+                v[:len(arr[row])] = arr[row]
+            return v
+
+        cx, cy, cz = (center[:3] if len(center) >= 3 else np.pad(center, (0, 3 - len(center))))
+        e1 = _get_vec3(comps, 0)
+        e2 = _get_vec3(comps, 1)
+        normal = _get_vec3(comps, 2)
+
+        r_vals = radius_local[idx_k]
+        p_vals = perp_local[idx_k]
+
+        cycle_rows.append({
+            "cycle": cyc_k,
+            "sample_start": s_start,
+            "sample_stop": s_stop,
+            "time_start": t_start,
+            "time_stop": t_stop,
+            "time_quarter": t_quarter,
+            "duration": duration,
+            "center_x": float(cx),
+            "center_y": float(cy),
+            "center_z": float(cz),
+            "e1_x": float(e1[0]),
+            "e1_y": float(e1[1]),
+            "e1_z": float(e1[2]),
+            "e2_x": float(e2[0]),
+            "e2_y": float(e2[1]),
+            "e2_z": float(e2[2]),
+            "normal_x": float(normal[0]),
+            "normal_y": float(normal[1]),
+            "normal_z": float(normal[2]),
+            "radius_mean": float(np.nanmean(r_vals)),
+            "radius_sd": float(np.nanstd(r_vals)),
+            "perp_mean": float(np.nanmean(p_vals)),
+            "perp_sd": float(np.nanstd(p_vals)),
+            "n_samples": len(idx_k),
+            "fit_ok": True,
+        })
+
+    if cycle_rows:
+        cycles = pd.DataFrame(cycle_rows, columns=CYCLE_COLUMNS)
+    else:
+        cycles = pd.DataFrame(columns=CYCLE_COLUMNS)
+
+    # ---- build details dict ----
+    details = {
+        "algorithm": "pca",
+        "models": models,
+        "phase_source": phase_source,
+        "input_columns": columns_used,
+        "amp_hilbert": amp_hilbert,
+        "warnings": [],
+    }
+
+    return samples, cycles, details
+
+
+def reconstruct_phase_coordinates(samples, cycles):
+    """
+    Reconstruct trajectory from samples and cycles DataFrames.
+
+    Returns np.ndarray of shape (n_time, 3). NaN rows where not reconstructable.
+    """
+    n_time = len(samples)
+    X_hat = np.full((n_time, 3), np.nan)
+
+    merged = samples[["sample_index", "cycle", "u", "v", "perp"]].merge(
+        cycles[["cycle", "center_x", "center_y", "center_z",
+                "e1_x", "e1_y", "e1_z",
+                "e2_x", "e2_y", "e2_z",
+                "normal_x", "normal_y", "normal_z", "fit_ok"]],
+        on="cycle", how="left"
+    )
+
+    mask = (
+        merged["fit_ok"].fillna(False) &
+        merged["u"].notna() &
+        merged["v"].notna() &
+        merged["perp"].notna()
+    )
+
+    m = merged[mask]
+    if len(m) == 0:
+        return X_hat
+
+    idx = m["sample_index"].values.astype(int)
+    u = m["u"].values
+    v = m["v"].values
+    perp = m["perp"].values
+
+    X_hat[idx, 0] = (m["center_x"].values + u * m["e1_x"].values
+                     + v * m["e2_x"].values + perp * m["normal_x"].values)
+    X_hat[idx, 1] = (m["center_y"].values + u * m["e1_y"].values
+                     + v * m["e2_y"].values + perp * m["normal_y"].values)
+    X_hat[idx, 2] = (m["center_z"].values + u * m["e1_z"].values
+                     + v * m["e2_z"].values + perp * m["normal_z"].values)
+
+    return X_hat
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible alias
+# ---------------------------------------------------------------------------
+
+def cycle_by_cycle_pca_coordinates(
+    X,
+    ref_signal=None,
+    phase=None,
+    fs=None,
+    f_range=None,
+    columns=None,
+    min_samples_per_cycle=10,
+):
+    """
+    Deprecated alias for fit_pca_phase_coordinates.
+
+    Returns (coords, models) for backwards compatibility.
+    """
+    samples, cycles, details = fit_pca_phase_coordinates(
+        X,
+        phase=phase,
+        ref_signal=ref_signal,
+        sampling_rate_hz=fs,
+        f_range=f_range,
+        columns=columns,
+        min_samples_per_cycle=min_samples_per_cycle,
+    )
+    models = details["models"]
+    amp_hilbert = details["amp_hilbert"]
+
+    # Reconstruct old-style coords DataFrame for backwards compatibility
+    coords = pd.DataFrame(
+        {
+            "cycle": samples["cycle"].values,
+            "phase": samples["phase"].values,
+            "phase_wrapped": np.angle(np.exp(1j * samples["phase"].values)),
+            "phase_in_cycle": samples["phase_in_cycle"].values,
+            "amp_hilbert": amp_hilbert,
+            "pc1_local": samples["u"].values,
+            "pc2_local": samples["v"].values,
+            "pc3_local": samples["perp"].values,
+            "theta_local": samples["theta"].values,
+            "theta_local_wrapped": samples["theta_wrapped"].values,
+            "radius_local": samples["radius"].values,
+            "perp_local": samples["perp"].values,
+        },
+        index=samples.index,
+    )
     return coords, models

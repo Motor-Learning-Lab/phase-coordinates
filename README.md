@@ -1,209 +1,185 @@
 # phase-coordinates
 
-Cycle-by-cycle PCA phase coordinates for multivariate cyclic motion data.
+phase-coordinates provides experimental tools for describing cyclic multivariate movement using phase, radius, and perpendicular deviation.
 
-Given a time series of 3-D (or higher-dimensional) movement data and an
-estimate of the instantaneous phase, this library fits a local PCA plane to
-each cycle and returns, for every time point:
-
-| Output column | Meaning |
-|---|---|
-| `cycle` | Integer cycle index |
-| **`phase_in_cycle`** | **Primary phase coordinate.** Phase within the current cycle (range `[0, 2π)`). Use this for cross-cycle alignment and averaging. |
-| `phase` / `phase_wrapped` | Unwrapped / wrapped global phase in radians |
-| **`radius_local`** | **Distance from the cycle centre** in the local PCA plane |
-| **`perp_local`** | **Signed deviation perpendicular** to the local phase plane (`= pc3_local`) |
-| `pc1_local`, `pc2_local`, `pc3_local` | Scores along each local principal component |
-| `theta_local` / `theta_local_wrapped` | Geometric angle in the local PCA plane (see note below) |
-| `amp_hilbert` | Hilbert amplitude of the reference signal (when phase is estimated internally) |
-
-> **Note on `theta_local`.**  `theta_local` is the geometric angle in the
-> local PCA plane and is useful for describing within-cycle geometry.
-> However, it should be treated **cautiously across cycles**: because PCA
-> axes can rotate, flip signs, or swap when PC1/PC2 variances are similar,
-> `theta_local` may be discontinuous between cycles.  Use `phase_in_cycle`
-> for reliable cross-cycle alignment.
-
-> **Cycle anchoring.**  Cycles are defined from `phase - phase[0]`, so cycle
-> boundaries are phase-based and anchored to the **first sample** of the
-> recording, not to any external behavioural event (e.g. heel strike, peak
-> flexion, or movement onset).  Users who need event-anchored cycles should
-> supply a `phase` variable that is itself anchored to the relevant event.
-
-> **Reconstruction accuracy.**  For **3-feature** input, reconstruction
-> from `(pc1_local, pc2_local, pc3_local)` together with the per-cycle
-> `center` and `components` is exact up to floating-point precision (the
-> three PCs span the full feature space).  For input with **more than 3
-> features**, only 3 principal components are retained, so reconstruction
-> is generally approximate and the residual depends on how much variance
-> the remaining components capture.
+Two peer algorithms are provided with a shared output interface. Both are experimental.
 
 ## Installation
 
 ```bash
-pip install .
+pip install phase-coordinates
 ```
 
-For development (includes pytest, Jupyter, and matplotlib):
+For the Bayesian algorithm:
 
 ```bash
-pip install ".[dev]"
+pip install "phase-coordinates[bayes]"
 ```
-
-**Requirements:** Python ≥ 3.9, NumPy, pandas, scikit-learn, SciPy.
 
 ## Quick start
 
-### Using a pre-computed phase
+### PCA algorithm
 
 ```python
 import numpy as np
-from phase_coordinates import cycle_by_cycle_pca_coordinates
+from phase_coordinates import fit_pca_phase_coordinates, reconstruct_phase_coordinates
 
-# X: (n_time, n_features) array of movement data — at least 3 features
-# phase_unwrapped: unwrapped phase in radians, same length as X
-coords, models = cycle_by_cycle_pca_coordinates(X, phase=phase_unwrapped)
-
-# Primary coordinates of interest:
-print(coords[["cycle", "phase_in_cycle", "radius_local", "perp_local"]])
+# X: (n_time, 3+) array of movement data
+# phase: unwrapped phase in radians (or use ref_signal + sampling_rate_hz + f_range)
+samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
+X_hat = reconstruct_phase_coordinates(samples, cycles)
 ```
 
-### Estimating phase from a reference signal (Hilbert transform)
+### Bayesian algorithm
 
 ```python
-from phase_coordinates import cycle_by_cycle_pca_coordinates
+from phase_coordinates import fit_bayesian_phase_coordinates, reconstruct_phase_coordinates
 
-coords, models = cycle_by_cycle_pca_coordinates(
-    X,
-    ref_signal=X[:, 0],   # scalar reference signal, e.g. one marker coordinate
-    fs=100.0,             # sampling rate in Hz
-    f_range=(0.5, 3.0),   # bandpass range in Hz: 0 < low < high < fs/2
-)
+# X: (n_time, 3) array; phase is estimated from the data
+samples, cycles, details = fit_bayesian_phase_coordinates(X, sampling_rate_hz=100.0)
+X_hat = reconstruct_phase_coordinates(samples, cycles)
 ```
 
-### Estimating phase directly
+## Shared outputs
 
-```python
-from phase_coordinates import hilbert_phase
+Both algorithms return `(samples, cycles, details)` with identical schemas for the first two outputs.
 
-phase_unwrapped, phase_wrapped, amplitude = hilbert_phase(
-    ref_signal, fs=100.0, f_range=(0.5, 3.0)
-)
-```
+### samples DataFrame
 
-`hilbert_phase` validates inputs and will raise a `ValueError` if the signal
-is non-finite, too short, or if `fs`/`f_range` are invalid.  It will also
-emit a `UserWarning` when the Hilbert phase shows many large negative steps
-(suggesting the reference signal or frequency band may not define a reliable
-instantaneous phase).
+One row per input time sample. Columns:
 
-### Reconstructing the original data from PCA coordinates
-
-`models[cyc]["indices"]` always contains **positional integer indices**.
-Use `coords.iloc[idx]` (not `coords.loc[idx]`) so that reconstruction works
-correctly even when the DataFrame has a non-default index (e.g. time stamps).
-
-For **3-feature** data the reconstruction is exact; for **>3 features** it is
-approximate (limited to the first 3 PCs).
-
-```python
-import numpy as np
-
-X_rec = np.full_like(X, np.nan)
-
-for cyc, m in models.items():
-    idx    = m["indices"]          # positional integer indices
-    center = m["center"]           # (n_features,)
-    comps  = m["components"]       # (3, n_features)
-    p1 = coords.iloc[idx]["pc1_local"].to_numpy()
-    p2 = coords.iloc[idx]["pc2_local"].to_numpy()
-    p3 = coords.iloc[idx]["pc3_local"].to_numpy()
-    X_rec[idx] = (
-        p1[:, None] * comps[0]
-        + p2[:, None] * comps[1]
-        + p3[:, None] * comps[2]
-        + center
-    )
-```
-
-## Repository layout
-
-```
-phase_coordinates/      Python package
-    __init__.py         Public API exports
-    core.py             hilbert_phase, cycle_by_cycle_pca_coordinates
-tests/
-    test_phase_coordinates.py   pytest test suite (51 tests)
-notebooks/
-    demo.ipynb          End-to-end demo notebook
-pyproject.toml          Project metadata and build configuration
-```
-
-## Demo notebook
-
-`notebooks/demo.ipynb` walks through:
-
-1. Generating synthetic 3-D noisy cyclic data (a tilted circle with Gaussian noise).
-2. Running `cycle_by_cycle_pca_coordinates` to recover the cycle-by-cycle phase
-   plane, per-time-point radius, angle, and perpendicular deviation.
-3. Reconstructing the original noisy data from the PCA coordinates and verifying
-   that the reconstruction error is at machine-precision level (3-D case).
-
-## Running the tests
-
-```bash
-python -m pytest tests/ -v
-```
-
-## Scientific framing
-
-This package implements a **cycle-by-cycle local PCA plane**, not a
-continuously varying plane.  Each cycle's plane is fitted independently to the
-data from that cycle.
-
-| Coordinate | Scientific meaning |
+| Column | Description |
 |---|---|
-| `phase_in_cycle` | Timing / phase reference for cross-cycle alignment and ensemble averaging |
-| `radius_local` | Movement amplitude (distance from local cycle centre in the local plane) |
-| `perp_local` | Out-of-plane deviation for that cycle's plane |
-| `theta_local` | Geometric angle in the local PCA plane — useful within a cycle, but treat with caution across cycles due to potential PCA axis rotation/flipping |
+| `sample_index` | Integer sample index (0-based) |
+| `time` | Time in seconds (NaN if `sampling_rate_hz` not provided for PCA) |
+| `cycle` | Integer cycle index |
+| `phase` | Unwrapped phase in radians |
+| `phase_in_cycle` | Phase within the current cycle, range `[0, 2π)` |
+| `u` | Score along the first in-plane axis |
+| `v` | Score along the second in-plane axis |
+| `radius` | In-plane radius (distance from cycle centre) |
+| `theta` | Geometric angle in the local plane (radians) |
+| `theta_wrapped` | `theta` wrapped to `[-π, π]` |
+| `perp` | Signed deviation perpendicular to the local plane |
+
+### cycles DataFrame
+
+One row per fitted cycle. Columns:
+
+| Column | Description |
+|---|---|
+| `cycle` | Integer cycle index |
+| `sample_start` | First sample index of the cycle |
+| `sample_stop` | One-past-last sample index (Python slice convention) |
+| `time_start` | Cycle start time in seconds |
+| `time_stop` | Cycle stop time in seconds |
+| `time_quarter` | Time at 25% of the cycle |
+| `duration` | Cycle duration in seconds |
+| `center_x/y/z` | Cycle centre position in 3-D |
+| `e1_x/y/z` | First in-plane axis direction |
+| `e2_x/y/z` | Second in-plane axis direction |
+| `normal_x/y/z` | Normal to the local plane |
+| `radius_mean` | Mean in-plane radius for this cycle |
+| `radius_sd` | Standard deviation of in-plane radius |
+| `perp_mean` | Mean perpendicular deviation |
+| `perp_sd` | Standard deviation of perpendicular deviation |
+| `n_samples` | Number of samples in this cycle |
+| `fit_ok` | True if the cycle was successfully fitted |
+
+### Reconstruction helper
+
+```python
+X_hat = reconstruct_phase_coordinates(samples, cycles)
+# Returns np.ndarray of shape (n_time, 3).
+# NaN rows where reconstruction is not possible (outside fitted window or unfitted cycles).
+```
+
+For 3-D input data and the PCA algorithm, reconstruction is exact to floating-point precision.
+
+## Algorithm 1: fit_pca_phase_coordinates
+
+```python
+samples, cycles, details = fit_pca_phase_coordinates(
+    X,
+    *,
+    phase=None,          # pre-computed unwrapped phase
+    ref_signal=None,     # scalar reference for Hilbert phase estimation
+    sampling_rate_hz=None,
+    f_range=None,        # bandpass (low, high) in Hz for Hilbert estimation
+    columns=None,        # subset of DataFrame columns to use
+    min_samples_per_cycle=10,
+)
+```
+
+**Assumptions:** Each cycle lies approximately in a plane (the PCA plane). The PCA plane is fitted independently per cycle, so the plane can change across cycles.
+
+**details dict:**
+- `algorithm`: `"pca"`
+- `models`: per-cycle dict with `pca`, `center`, `components`, `explained_variance_ratio`, `indices`
+- `phase_source`: `"provided"` or `"hilbert"`
+- `amp_hilbert`: Hilbert amplitude array (NaN if phase was supplied directly)
+- `warnings`: list of any collected warnings
+
+## Algorithm 2: fit_bayesian_phase_coordinates
+
+```python
+samples, cycles, details = fit_bayesian_phase_coordinates(
+    X,
+    *,
+    sampling_rate_hz,    # required
+    columns=None,
+    draws=1000,
+    tune=1000,
+    chains=4,
+    target_accept=0.9,
+    random_seed=None,
+    return_report=False,
+)
+```
+
+**Assumptions:** 3-D data only. Phase is estimated jointly with geometry using MCMC. The cycle-fixed frame uses an oriented basis derived from cycle-boundary anchor points.
+
+**details dict:**
+- `algorithm`: `"bayesian"`
+- `diagnostics`: dict with convergence/quality diagnostics
+- `uncertainty`: dict with posterior standard deviations
+- `sampling_metadata`: MCMC settings used
+- `report` (if `return_report=True`): layer1 and layer2 ArviZ InferenceData objects
+
+## Which algorithm?
+
+| | `fit_pca_phase_coordinates` | `fit_bayesian_phase_coordinates` |
+|---|---|---|
+| Geometry model | Local PCA plane per cycle | Cycle-fixed oriented frame |
+| Speed | Fast | Slow (MCMC) |
+| Phase input | Supplied or Hilbert | Estimated from data |
+| Dimensions | 3-D or higher | 3-D only |
+| Uncertainty | None | Posterior uncertainty |
+| Known limitations | PCA axes may flip/rotate between cycles | Endpoint boundary drift; linear phase within cycle; MCMC runtime |
+
+## Notebooks
+
+- `notebooks/pca_phase_coordinates_demo.ipynb`
+- `notebooks/bayesian_phase_coordinates_demo.ipynb`
+
+## Known limitations
+
+**fit_pca_phase_coordinates:**
+- PCA axes can flip sign or rotate between cycles when PC1/PC2 variances are similar, making `theta` inconsistent across cycles. Use `phase_in_cycle` for cross-cycle alignment.
+- Cycle boundaries are anchored to the first sample of the recording, not to external behavioural events.
+- For input with more than 3 features, only 3 principal components are retained; reconstruction is approximate.
+
+**fit_bayesian_phase_coordinates:**
+- Endpoint boundary drift: the first and last cycle boundaries can drift 3-5 samples from the true cycle start/end, inflating residuals in the first and last cycles.
+- Linear phase within cycle: the model assumes linear phase within each cycle, which inflates sigma_x when within-cycle speed is non-uniform.
+- MCMC runtime: a 400-sample, 4-cycle run takes ~10-60 seconds; real data with more cycles and draws will take longer.
+- 3-D only.
 
 ## API reference
 
-### `hilbert_phase(ref_signal, fs, f_range)`
-
-Estimates instantaneous phase from a 1-D scalar reference signal using a
-zero-phase 4th-order Butterworth bandpass filter followed by the Hilbert
-transform.
-
-**Raises `ValueError`** if `ref_signal` is not 1-D, contains non-finite
-values, is too short for the filter, `fs ≤ 0`, or `f_range` does not satisfy
-`0 < low < high < fs/2`.
-
-**Warns (`UserWarning`)** when the unwrapped phase has many large negative
-steps in the central region, suggesting an unreliable phase estimate.
-
-**Returns** `(phase_unwrapped, phase_wrapped, amplitude)` — all NumPy arrays
-of shape `(n_time,)`.
-
----
-
-### `cycle_by_cycle_pca_coordinates(X, *, ref_signal=None, phase=None, fs=None, f_range=None, columns=None, min_samples_per_cycle=10)`
-
-Fits a PCA plane to each cycle and computes geometric coordinates for every
-time point.
-
-**`X`** — `(n_time, n_features)` array-like or `pandas.DataFrame` with at
-least 3 features.
-
-**Phase input** — supply *either* a pre-computed unwrapped `phase` array *or*
-a `ref_signal` together with `fs` and `f_range`.
-
-**Returns** `(coords, models)`:
-
-- `coords` — `pandas.DataFrame` with one row per time point (columns listed in
-  the table at the top of this README).  The recommended primary coordinates
-  are `phase_in_cycle`, `radius_local`, and `perp_local`.
-- `models` — `dict` keyed by cycle index. Each value contains the fitted `pca`
-  object, cycle `center`, sign-aligned `components`, `explained_variance_ratio`,
-  and the positional time `indices` belonging to that cycle.
+- `hilbert_phase(ref_signal, fs, f_range)` → `(phase_unwrapped, phase_wrapped, amplitude)`
+- `fit_pca_phase_coordinates(X, ...)` → `(samples, cycles, details)`
+- `fit_bayesian_phase_coordinates(X, *, sampling_rate_hz, ...)` → `(samples, cycles, details)`
+- `reconstruct_phase_coordinates(samples, cycles)` → `np.ndarray (n_time, 3)`
+- `SAMPLE_COLUMNS` — list of column names for the samples DataFrame
+- `CYCLE_COLUMNS` — list of column names for the cycles DataFrame
