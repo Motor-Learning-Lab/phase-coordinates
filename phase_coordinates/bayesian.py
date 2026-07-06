@@ -892,11 +892,11 @@ def _check_boundary_multimodality(idata1, K, T_for_floor):
         top2 = sorted(peaks[np.argsort(-density[peaks])[:2]])
         p1, p2 = top2
         split = p1 + int(np.argmin(density[p1 : p2 + 1]))
-        total = np.trapz(density, grid)
+        total = np.trapezoid(density, grid)
         if total <= 0:
             continue
-        mass1 = np.trapz(density[: split + 1], grid[: split + 1]) / total
-        mass2 = np.trapz(density[split:], grid[split:]) / total
+        mass1 = np.trapezoid(density[: split + 1], grid[: split + 1]) / total
+        mass2 = np.trapezoid(density[split:], grid[split:]) / total
         separation = float(grid[p2] - grid[p1])
         if mass1 > 0.20 and mass2 > 0.20 and separation > 0.20 * T_for_floor[k]:
             return True

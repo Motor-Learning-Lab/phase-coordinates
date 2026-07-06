@@ -169,7 +169,7 @@ samples, cycles, details = fit_bayesian_phase_coordinates(
 **fit_pca_phase_coordinates:**
 - PCA axes can flip sign or rotate between cycles when PC1/PC2 variances are similar, making `theta` inconsistent across cycles. Use `phase_in_cycle` for cross-cycle alignment.
 - Cycle boundaries are anchored to the first sample of the recording, not to external behavioural events.
-- For input with more than 3 features, only 3 principal components are retained; reconstruction is approximate.
+- For input with more than 3 features, only 3 principal components are retained; reconstruction is approximate. `reconstruct_phase_coordinates` always reconstructs a 3-D representation; for >3D PCA input, use `details["models"]` if you need reconstruction in the original feature space.
 
 **fit_bayesian_phase_coordinates:**
 - Endpoint boundary drift: the first and last cycle boundaries can drift 3-5 samples from the true cycle start/end, inflating residuals in the first and last cycles.
