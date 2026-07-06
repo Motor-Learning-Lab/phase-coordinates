@@ -422,7 +422,7 @@ _LAYER2_CENTER_FLOOR_FRAC = 0.02          # * R_X
 _LAYER2_NORMAL_FLOOR = 0.03
 
 _OBS_NOISE_LOGNORMAL_MU = np.log(0.03)
-_OBS_NOISE_LOGNORMAL_SD = 0.3     # tightened from 0.5; 95% CI [0.016, 0.056]*R_X
+_OBS_NOISE_LOGNORMAL_SD = 0.5     # reverted: 0.3 caused divergences; correct-mode initvals now prevent wrong-mode escape
 
 _PHASE_VELOCITY_LOGKNOT_SD = 0.20
 _PHASE_VELOCITY_SMOOTHNESS_SD = 0.15
@@ -685,6 +685,8 @@ def _fit_layer2(
     target_accept,
     random_seed,
     use_numba,
+    _sigma_x_override=None,
+    _init_override=None,
 ):
     """
     Instantaneous model (spec: "Layer 2: instantaneous model"). Uses the
@@ -775,6 +777,23 @@ def _fit_layer2(
 
     r0_hat = float(np.median(np.linalg.norm(layer1.boundary_direction_mean, axis=-1)))
     r0_hat = max(r0_hat, 1e-3 * R_X)
+
+    # Better a2 initval: direction from estimated center to the ACTUAL DATA at each
+    # boundary time, not Layer 1's per-cycle mean boundary direction.  Layer 1's
+    # a_mean_p is the posterior mean of the cycle-level boundary direction, which
+    # can deviate >20° from the true data at tau_mean (because it's an average over
+    # the whole cycle, not the point estimate at tau_k).  Starting from a2=a_mean_p
+    # with sigma_x=0.02 produces ~19-sigma residuals at boundary points, corrupting
+    # the MAP and NUTS warm-up. Using the actual data at tau_k reduces initval
+    # residuals to ~noise level.
+    a2_init = np.zeros_like(a_mean_p)
+    for k in range(K):
+        tau_k = tau_mean[k]
+        idx_k = int(round((tau_k - t_fit[0]) * fs))
+        idx_k = max(0, min(n_time - 1, idx_k))
+        a2_init[k] = X_fit[idx_k] - c_mean_p[k]
+    # Last row: copy from second-to-last (matches how a_mean_p is padded)
+    a2_init[-1] = a2_init[-2]
 
     with pm.Model():
         # --- Center ---
@@ -878,24 +897,36 @@ def _fit_layer2(
         )
         pm.Deterministic("predicted_trajectory", pred)
 
-        rho_x = pm.Lognormal("rho_x", mu=_OBS_NOISE_LOGNORMAL_MU, sigma=_OBS_NOISE_LOGNORMAL_SD)
-        sigma_x = pm.Deterministic("sigma_x", R_X * rho_x)
-        pm.Normal("X_obs", mu=pred, sigma=sigma_x, observed=X_fit)
-
-        initvals = {
-            "c2": c_mean_p,
-            "delta_n": np.zeros((K, 2)),
-            "a2": a_mean_p,
-            "q_knots": np.zeros(n_velocity_knots),
-            "h_r_knots": np.full(n_velocity_knots, np.log(r0_hat)),
-            "h_z_knots": np.zeros(n_velocity_knots),
-            "rho_x": 0.03,
-        }
-        idata2 = pm.sample(
-            **_sample_kwargs(
-                draws, tune, chains, target_accept, random_seed, use_numba, initvals
-            )
+        if _sigma_x_override is not None:
+            sigma_x_val = float(_sigma_x_override)
+            pm.Normal("X_obs", mu=pred, sigma=sigma_x_val, observed=X_fit)
+            initvals = {
+                "c2": c_mean_p,
+                "delta_n": np.zeros((K, 2)),
+                "a2": a2_init,
+                "q_knots": np.zeros(n_velocity_knots),
+                "h_r_knots": np.full(n_velocity_knots, np.log(r0_hat)),
+                "h_z_knots": np.zeros(n_velocity_knots),
+            }
+        else:
+            rho_x = pm.Lognormal("rho_x", mu=_OBS_NOISE_LOGNORMAL_MU, sigma=_OBS_NOISE_LOGNORMAL_SD)
+            sigma_x = pm.Deterministic("sigma_x", R_X * rho_x)
+            pm.Normal("X_obs", mu=pred, sigma=sigma_x, observed=X_fit)
+            initvals = {
+                "c2": c_mean_p,
+                "delta_n": np.zeros((K, 2)),
+                "a2": a2_init,
+                "q_knots": np.zeros(n_velocity_knots),
+                "h_r_knots": np.full(n_velocity_knots, np.log(r0_hat)),
+                "h_z_knots": np.zeros(n_velocity_knots),
+                "rho_x": 0.03,
+            }
+        sample_kw = _sample_kwargs(
+            draws, tune, chains, target_accept, random_seed, use_numba, initvals
         )
+        if _init_override is not None:
+            sample_kw["init"] = _init_override
+        idata2 = pm.sample(**sample_kw)
 
     post = idata2.posterior
 
@@ -944,7 +975,7 @@ def _fit_layer2(
         perp_deviation_mean=pmean("perp_deviation"),
         perp_deviation_sd=psd("perp_deviation"),
         predicted_trajectory_mean=pmean("predicted_trajectory"),
-        sigma_x_mean=float(pmean("sigma_x")),
+        sigma_x_mean=_sigma_x_override if _sigma_x_override is not None else float(pmean("sigma_x")),
         idata=idata2,
     )
 

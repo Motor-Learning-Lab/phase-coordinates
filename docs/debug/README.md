@@ -55,6 +55,7 @@ etc.) is the interpreted result.
 | `07_layer2_initvals_rerun_84div_999s_WORST.log` | `test_layer2.py` (same as 06, rerun after crash) | 12 vel knots, target_accept=0.9, plain PyMC, explicit initvals for every free var | **999s, 84 divergences** (worse than log 02's 17) — explicit initvals did not fix the problem and made sampling harder, not easier. min cos_sim 0.51 (same artifact, still present). This is the strongest evidence that **initialization is not the (main) root cause** — Layer 1's identical fix (explicit initvals + `init="adapt_diag"`) fully resolved its own, mechanistically similar sign-flip bug, but the same fix did not transfer to Layer 2. |
 | `08_layer2_reparam_0div_418s_CHECKS_PASSED.log` | `test_layer2.py` (reparameterized model — tangent-plane normals + boundary-normalized phase) | 12 vel knots, tune=400, draws=400, chains=2, target_accept=0.9 | **0 divergences, 418s, ALL CHECKS PASSED.** Normal artifact: GONE (min cos_sim 0.9915 vs 0.51 before). Phase monotone by construction. Radius median 0.709 (barely above 0.7 floor), sigma_x_mean 0.467 (expected ~0.02). Chain 1 max_treedepth, rhat/ESS warnings — amplitude parameters haven't converged yet but normal and phase fully recovered. |
 | `09_layer2_reparam_debug_normal_worst_cossim_0.9915.log` | `debug_layer2_normal.py` (on reparameterized model) | Same as 08 | Worst cos_sim across all time: **0.9915** (t≈1.10-1.17s, between spline knots 0 and 1). True normal cos_sim ≥ 0.9915 everywhere — the old localized artifact (cos_sim 0.40) is completely gone. normal_angular_sd at worst points ≈ 0.050 rad (model slightly underestimates uncertainty at these points but no longer confidently wrong). |
+| `10_layer2_tune1000_40div_767s_radius_1.251_FAIL.log` | `test_layer2_tune1000.py` | tune=1000, draws=400, chains=2, target_accept=0.9 | **40 divergences, 767s, radius median 1.251 (FAIL: > 1.15 threshold)**. Amplitude convergence WORSENED with more tune steps. Root cause: `_OBS_NOISE_LOGNORMAL_SD=0.5` allows chain to drift to high-noise region during warmup (rho_x≈0.47, gaining ~5800 likelihood nats vs prior penalty of only -15 nats). Fix: tighten SD to 0.3. |
 
 ## Reparameterization implemented (2026-07-05)
 
@@ -84,8 +85,11 @@ converging — Chain 1 max_treedepth, low ESS. See log 08 for full output.
 **Follow-up (log 09)**: `debug_layer2_normal.py` confirmed the localized artifact
 is gone — worst cos_sim across all 600 time points is 0.9915 (vs 0.40 before).
 
-**Ongoing**: `test_layer2_tune1000.py` (tune=1000) running to investigate amplitude
-convergence.
+**Log 10** (`test_layer2_tune1000.py`): 40 divergences, radius 1.251 — WORSE than
+log 08. Root cause: noise prior too wide (sigma=0.5 allows high-noise region).
+
+**Fix applied**: `_OBS_NOISE_LOGNORMAL_SD` tightened from 0.5 to 0.3 in `bayesian.py`.
+**New test running**: `test_layer2.py` with tightened noise prior (log 11 pending).
 
 ## Post-reparameterization status (2026-07-06)
 

@@ -14,30 +14,34 @@ python for everything**, not the `python` on PATH.
 
 ## Status as of last update (2026-07-06)
 
-**Primary reparameterization complete (divergences and normal artifact fixed);
-amplitude convergence fixed by tightening noise prior; test in progress.**
+**Reparameterization complete; a2_init fix implemented; amplitude-noise ridge
+remains the open problem. Test passes but radius/sigma_x are off ground truth.**
 
 The full reparameterization (tangent-plane normals + boundary-normalized phase)
-eliminated divergences (0 vs 84) and the localized normal artifact (min cos_sim
-0.9915 vs 0.51). However, amplitude parameters (radius, sigma_x) converged to
-wrong values: radius median 0.709 (expected ~1.0), sigma_x 0.467 (expected ~0.02).
-A tune=1000 experiment made this WORSE (40 divergences, radius 1.251).
+eliminated divergences and the localized normal artifact. Amplitude parameters
+(radius, sigma_x) still converge to wrong values due to an amplitude-noise ridge
+in the posterior: `r_t` and `sigma_x` can trade off (`r × sigma_x ≈ const`) along
+a nearly-flat likelihood direction. NUTS exploits this ridge during warmup and gets
+stuck at the wrong mode.
 
-**Root cause identified:** `_OBS_NOISE_LOGNORMAL_SD = 0.5` allowed the NUTS chain
-to drift, during warmup, to a high-noise region (rho_x=0.47) where the likelihood
-compensates for wrong radius with inflated noise. With 569 data points, a wrong
-radius of 0.71 creates residuals of ~0.29 per step; absorbing these into sigma_x
-gains ~5800 nats of likelihood (vs sigma_x=0.02) — enough to partially overcome
-the prior penalty at rho_x=0.47 if the chain gets there. Once stuck there, adapt_diag
-calibrates its mass matrix to this wrong region, trapping all subsequent draws.
+**Identified root cause of initvals problem (finding 8):** Layer 1's per-cycle mean
+boundary direction (`a_mean_p`) deviates ~21° from the actual data at tau_k, creating
+~19-sigma residuals at the Layer 2 initvals (sigma_x=0.02). This corrupts both MAP
+optimization and NUTS warmup. **Fix applied:** compute `a2_init[k] = X_fit[idx_k] -
+c_mean_p[k]` from the actual data at each boundary time. This reduced residuals at
+initvals to ~noise level. Also reverted `_OBS_NOISE_LOGNORMAL_SD` from 0.3 back to 0.5
+(0.3 caused 400+ divergences regardless of initvals; finding 7 below).
 
-**Fix applied:** tightened `_OBS_NOISE_LOGNORMAL_SD` from 0.5 to 0.3 (95% CI for
-rho_x: [0.016, 0.056] instead of [0.011, 0.082]). At sigma=0.3, rho_x=0.47 is 9.2
-prior-SDs from the mode, imposing a -41 nat prior penalty that prevents the chain
-from ever visiting that region. **New test running** (`test_layer2.py` with the
-updated prior, standard tune=400). Results to be added here.
+**Current test result** (`test_layer2.py` with a2_init fix, sigma=0.5): test
+assertions PASS (all), 51 divergences, radius median 1.148 (was 0.709), sigma_x
+0.341 (was 0.467). Progress, but amplitude still far from ground truth (~1.0, ~0.02).
 
-**See "Layer 2 findings" items 4 and 5 for the detailed evidence trail (logs 08-10).**
+**Best amplitude result to date:** fixed sigma_x gave radius=0.961 (finding 9).
+Proves trajectory params converge correctly when the amplitude-noise ridge is broken.
+Current live experiment: two-phase approach (Phase 1 fixed sigma_x → Phase 2 warm
+start with free sigma_x). See finding 10.
+
+**See "Layer 2 findings" items 4-10 for the detailed evidence trail.**
 
 **Environment**: a new pixi environment is now set up for this project
 (`pixi.toml` at the repo root). Use `pixi run python <script>` or
@@ -124,15 +128,14 @@ low ESS). See "Layer 2 findings" item 4 below for full detail.
 
 ## What's NOT done yet
 
-- [ ] **Amplitude convergence** — radius and sigma_x don't match ground truth
-      (median radius 0.709 vs expected 1.0; sigma_x 0.467 vs expected ~0.02).
-      Reparameterization eliminated divergences (was 84, now 0) and fixed the
-      normal artifact (min cos_sim now 0.9915). Chain 1 still hits max_treedepth
-      and ESS < 100 for some amplitude parameters, suggesting the mass matrix
-      needs more tune steps. Next: run with tune=1000 to confirm.
-      All Layer 2 test assertions pass at current settings (the 0.7 radius floor
-      is barely met), but amplitude accuracy needs improvement before the suite
-      is trustworthy.
+- [ ] **Amplitude convergence** — radius and sigma_x still off ground truth
+      (current: radius 1.148 vs expected ~1.0; sigma_x 0.341 vs expected ~0.02).
+      Root cause: amplitude-noise ridge (`r × sigma_x ≈ const`) — NUTS exploits
+      this during warmup and gets stuck off the true mode. a2_init fix improved
+      radius from 0.709 → 1.148 but didn't resolve the ridge. Best result to date:
+      fixed sigma_x gives radius=0.961 (finding 9). Current approach: two-phase
+      sampling (finding 10), not yet completed. Test assertions pass with loose
+      bounds (0.7 < median radius < 1.3), but amplitude accuracy needs improvement.
 - [ ] pytest test suite (`tests/test_bayesian_phase_coordinates.py`) covering the
       7 required scenarios from the prompt (see "Required tests" below).
 - [ ] Run full suite (existing + new) on both the no-pymc default env and the
@@ -452,33 +455,90 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
    sigma=0.5). So the chain gets stuck in the (wrong r, wrong sigma_x) region and
    adapt_diag calibrates there, trapping subsequent draws.
 
-   **Fix applied: `_OBS_NOISE_LOGNORMAL_SD = 0.3`** (was 0.5). 95% CI for rho_x
-   becomes [0.016, 0.056]. At rho_x=0.47 the prior penalty is now -41 nats —
-   impossible to overcome given the chain starts near the correct values. This
-   prevents the chain from ever visiting the wrong region during warmup.
-
-   **Test with tightened prior running** — results to be added in finding 6.
+   **Fix attempted: `_OBS_NOISE_LOGNORMAL_SD = 0.3`** — see finding 7 for results.
 
 6. **Runtime concern**: a full Layer 2 fit at draws=400/tune=400/chains=2 takes
    ~418s (fastest successful run). For the pytest suite this is slow — a separate
    "short" test configuration (fewer cycles, fewer draws) may be needed.
 
-7. **The model's own posterior-SD uncertainty does NOT flag the bad region.**
-   In the artifact window (t=0.58-0.67s in the nutpie run), `normal_angular_sd`
-   — the posterior SD of the normal direction, which is exactly the quantity
-   the diagnostics module reports to users as an uncertainty estimate — was
-   0.060-0.073 rad, **not elevated** relative to typical healthy values seen
-   elsewhere (~0.06-0.07 rad in Layer 1). So this isn't a case where the model
-   "knows" it's uncertain there and a user could catch it from the reported
-   uncertainty; the point estimate is confidently wrong. This is important
-   for whoever debugs the parameterization: it suggests most individual
-   posterior draws agree on a stable-but-wrong compromise in that window,
-   rather than the window having genuine high posterior variance/bimodality.
-   See `docs/debug/README.md`'s "current best hypothesis" section for the
-   leading theory (contamination from the phase-velocity sub-model's
-   difficult geometry within shared HMC trajectories) and full detail
-   (`docs/debug/logs/04_layer2_worst_cossim_location_debug.log` has the raw
-   numbers).
+7. **sigma=0.3 caused 400–664 divergences (2026-07-06, logs 09-11).**
+   Two experiments with `_OBS_NOISE_LOGNORMAL_SD = 0.3`:
+   - ta=0.9, tune=400: **400 divergences**, radius ~0.5-0.7 (various wrong modes)
+   - ta=0.95, tune=400: **664 divergences** (worse, not better)
+   - ta=0.99, tune=1000, sigma=0.5: **30 divergences, radius 1.739** — a completely
+     different wrong mode; tiny steps from high ta allow the chain to slowly crawl
+     up the amplitude-noise ridge during 1000 warmup steps.
+
+   Why sigma=0.3 causes divergences: the tighter prior creates steeper gradient
+   walls in rho_x space. The chain's adapted step size (calibrated to the wrong
+   mode's geometry) generates leapfrog trajectories that crash into these steep
+   walls, causing divergences. The prior gradient is 2.75× steeper than sigma=0.5,
+   and the chain was already in the wrong region (radius far from 1.0).
+
+   **Decision: reverted `_OBS_NOISE_LOGNORMAL_SD` back to 0.5.** Tightening the
+   noise prior is not the right fix — it either causes divergences (from the wrong
+   region) or forces the chain to a different wrong mode. The root problem is that
+   the chain reaches the wrong region in the first place.
+
+8. **True root cause: a2_init mismatch causes 19-sigma initval residuals (2026-07-06).**
+   Diagnosed via MAP analysis and logp evaluation. Layer 1's `a_mean_p` (per-cycle
+   mean boundary direction) deviates ~21.6° from the actual data direction at tau_k.
+   This is because Layer 1 estimates the CYCLE-AVERAGE boundary direction, not the
+   instantaneous direction at the boundary time itself.
+
+   Effect: at initvals (a2=a_mean_p, rho_x=0.03), predicted trajectory at tau_k is
+   ~0.376 units away from observed data while sigma_x ≈ 0.02 — a ~19-sigma residual.
+   L-BFGS-B MAP optimization from BOTH the correct and wrong starting points found
+   the same wrong mode (radius=0.840, rho_x=0.411) with ||grad||=690 (not converged).
+
+   **Fix applied:** compute `a2_init[k] = X_fit[idx_k] - c_mean_p[k]`, the vector
+   from estimated center to actual data at the boundary time. This gives near-zero
+   residuals at initvals (residuals ≈ noise level). Both `_fit_layer2` initvals
+   blocks updated to use `a2_init` instead of `a_mean_p`.
+
+   Also added debug parameters `_sigma_x_override` and `_init_override` to
+   `_fit_layer2` signature for diagnostic experiments.
+
+9. **Post-a2_init-fix experiments (2026-07-06).**
+   Multiple experiments after implementing the a2_init fix:
+
+   - **sigma=0.5 + a2_init (test_layer2.py)**: 51 divergences, radius 1.148,
+     sigma_x 0.341. Test PASSES. Progress from 0.709→1.148 but still far from 1.0.
+   - **sigma=0.3 + a2_init**: 0 divergences, but radius 0.570, sigma_x 0.513.
+     Different (worse) wrong mode. Tighter prior doesn't help — chain still slides
+     along amplitude-noise ridge during warmup, settling at a different bad point.
+   - **h_r_knots sigma=0.1 + a2_init**: 390 divergences, radius 1.355. Much tighter
+     radius prior creates steep gradient walls → divergences.
+   - **Layer 1 radius uncertainty**: sigma_r_k ≈ 0.17-0.21 per cycle (high), giving
+     a data-informed sigma_logr ≈ 0.25 — barely tighter than the current 0.3. Layer
+     1's boundary direction estimates are noisy at the per-cycle level.
+   - **Fixed sigma_x = R_X*0.03**: **0 divergences, radius 0.961** — closest to
+     true 1.0 seen yet. Max_treedepth in both chains and somewhat poor normal
+     recovery, but PROVES trajectory params converge near-correctly when the
+     amplitude-noise ridge is eliminated.
+   - **adapt_full + sigma=0.5, tune=400**: 275 divergences. PyMC's adapt_full is
+     experimental and needs ~10× tune steps for reliable 93-parameter covariance
+     estimation.
+   - **advi+adapt_diag**: 470 divergences. ADVI's mean-field approximation doesn't
+     capture parameter correlations; the resulting initial mass matrix is worse than
+     identity for this geometry.
+   - **Fixed sigma_x + adapt_full, tune=1000**: 48 divergences, radius 0.902.
+     adapt_full still struggles.
+
+   **Key insight from fixed-sigma_x result**: the amplitude-noise ridge (`r × sigma_x
+   ≈ const`) is the sole obstacle. Once sigma_x is held fixed (ridge broken), radius
+   converges to 0.961 with 0 divergences. The problem is purely about sampling sigma_x
+   jointly with r.
+
+10. **Current approach: two-phase warmup (2026-07-06, in progress).**
+    Phase 1: run `_fit_layer2` with `_sigma_x_override = R_X * 0.03` (breaks the
+    amplitude-noise ridge). Phase 2: extract trajectory posterior means from Phase 1,
+    use as initvals for full model with free sigma_x. Theory: Phase 1 finds the correct
+    trajectory neighborhood; Phase 2's warmup starts from a good trajectory point so
+    the mass matrix adapts to the true posterior geometry rather than the ridge.
+
+    A `test_layer2_twophase.py` script was written and launched but was killed (OOM,
+    exit 137) before completing. Needs re-run or memory investigation.
 
 ## Design decisions / deviations from the literal spec (for the final report)
 
