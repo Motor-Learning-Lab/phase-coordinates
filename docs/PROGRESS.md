@@ -15,14 +15,16 @@ python for everything**, not the `python` on PATH.
 ## Status as of last update (2026-07-06)
 
 **Reparameterization complete; a2_init fixes applied; amplitude-noise ridge
-confirmed as the core unsolved problem. Test passes but radius/sigma_x are off.**
+diagnosed in detail. Root cause: adapt_diag warmup drifts to wrong mode and
+the adapted mass matrix locks it in. Fix identified: initialize from MAP or
+from a fixed-sigma fit (seed=0).**
 
 The full reparameterization (tangent-plane normals + boundary-normalized phase)
 eliminated divergences and the localized normal artifact. Amplitude parameters
 (radius, sigma_x) still converge to wrong values due to an amplitude-noise ridge
 in the posterior: `r_t` and `sigma_x` can trade off (`r × sigma_x ≈ const`) along
-a nearly-flat likelihood direction. NUTS exploits this ridge during warmup and gets
-stuck at the wrong mode.
+a nearly-flat likelihood direction. NUTS warmup drifts to the ridge and the adapted
+mass matrix then locks the chain in — both chains stuck from draw 1 (finding 12).
 
 **Fixes applied (findings 8, 11):**
 - initval: `a2_init[k] = X_fit[idx_k] - c_mean_p[k]` (reduced ~19-sigma boundary
@@ -32,15 +34,19 @@ stuck at the wrong mode.
 - Reverted `_OBS_NOISE_LOGNORMAL_SD` from 0.3 back to 0.5 (finding 7)
 
 **Current test result** (`test_layer2.py`, finding 11): test assertions PASS, 40
-divergences, radius median 1.123, sigma_x 0.362. The a2 prior-mean change did not
-substantially resolve the amplitude-noise ridge. sigma_x is still ~18x ground truth.
+divergences, radius median 1.123, sigma_x 0.362. sigma_x is still ~18x ground truth.
 
-**Confirmed:** the amplitude-noise ridge is the dominant problem, not the a2 prior.
-Fixed sigma_x gives radius=0.961 (finding 9), proving trajectory params converge
-correctly when the ridge is broken. Next step: four-condition comparison (A-D) per
-finding 11 to isolate whether the remaining error is from the ridge or something else.
+**Diagnosed (finding 12):** chains start near truth (r≈1, sigma_x≈0.03) but warmup
+carries them to the ridge (corr = -0.993, stuck from draw 1, zero draws near true
+mode). The amplitude is run-to-run unstable — different wrong ridge points each run
+(r=0.709/0.88/1.12/1.25 across logs 08–11). True mode is 4763 nats better than the
+posterior mean but never found. Fixed sigma_x (seed=0) reaches r=0.961 in 8 div
+(finding 9), confirming the correct mode exists; the obstacle is warmup, not geometry.
 
-**See "Layer 2 findings" items 4-11 for the detailed evidence trail.**
+**Next step:** initialize the free-sigma fit from a fixed-sigma (seed=0) run or from
+`pm.find_MAP()`. See finding 12 for full evidence and recommendation.
+
+**See "Layer 2 findings" items 4-12 for the detailed evidence trail.**
 
 **Environment**: a new pixi environment is now set up for this project
 (`pixi.toml` at the repo root). Use `pixi run python <script>` or
@@ -607,25 +613,52 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
     - OLS radius from posterior trajectory direction = 1.22 (true 1.0), SD = 0.73
     - RMS cyclic residual = 0.42, RMS tangential = 0.36 (should both be ~0.02)
 
-    **Fixed-sigma fit (seed=42): 458 divergences, cos_sim 0.21 — seed-specific
-    failure.** This contradicts finding 9 (seed=0, fixed sigma_x → 8 div, radius
-    0.961, all checks passed). The fixed-sigma MODEL is structurally fine; seed=42
-    happens to start the warmup in a bad region where sigma_x=0.02 creates enormous
-    gradients (steep walls) before the trajectory has found the orbital plane. This
-    run added ~8 min of compute and is the one result that is not diagnostic —
-    see user feedback on diagnostic script design.
+    **Fixed-sigma fit (seed=42): 458 divergences, cos_sim median 0.58 — seed-specific
+    failure, but informative.** This contradicts finding 9 (seed=0, fixed sigma_x →
+    8 div, radius 0.961, all checks passed), confirming the fixed-sigma model is
+    initialization-sensitive. Two things this run tells us beyond "seed=42 is bad":
+    (a) Even with 458 divergences and cos_sim 0.58, the fixed-sigma posterior mean
+    achieves log-lik +2462 vs the free-sigma run's -505 — the correct amplitude
+    matters more than the normal being somewhat off. (b) The 458-divergence pattern
+    (tight sigma + bad warmup → steep gradient walls → cascade of divergences) is
+    exactly the mechanism identified in finding 7 to explain why sigma_lognormal_SD=0.3
+    caused 400–664 divergences. The fixed-sigma run is the limiting case of "tight
+    sigma prior", confirming that interpretation.
 
-    **Conclusion:** adapt_diag warmup drives both chains to the wrong mode and the
-    adapted mass matrix then locks them in. The chains start near the truth (r≈1,
-    sigma_x≈0.03), but warmup carries them onto the ridge and traps them there. The
-    fixed-sigma result (finding 9, seed=0) proves the correct mode exists and is
-    reachable. The problem is purely about warmup finding it with free sigma_x.
+    **Cross-run amplitude instability (logs 08, 10, 11 compared):**
+    Across all free-sigma runs with similar configuration, the amplitude result is
+    different every time — landing on different points on the ridge depending on the
+    warmup path:
 
-    **Recommended next fix:** initialize the free-sigma fit from the MAP point found
-    by gradient optimization (`pm.find_MAP()`), or from a quick fixed-sigma fit
-    (seed=0) whose trajectory posterior means are used as initvals for the full model.
-    Either approach prevents the warmup drift by starting at a point already on the
-    true posterior mode.
+    | Log | tune | div | r_median | sigma_x | r×sigma |
+    |-----|------|-----|----------|---------|---------|
+    | 08  | 400  | 0   | 0.709    | 0.467   | 0.331   |
+    | 10  | 1000 | 40  | 1.251    | ~0.28 est. | ~0.35 |
+    | 11  | 400  | 40  | 1.123    | 0.362   | 0.406   |
+
+    The r×sigma product varies (0.33–0.41) — these are not the same wrong mode. The
+    chains reach different ridge points on each run. Notably, log 08 (0 divergences —
+    the "best" run by NUTS health metrics) gives the worst amplitude (r=0.709). Zero
+    divergences means the sampler adapted cleanly to the geometry of whatever mode it
+    found, not that it found the right mode. More warmup (log 10, tune=1000) moved the
+    amplitude further from truth (r=1.251), not closer — more adapt_diag iterations
+    deepen the commitment to whatever wrong ridge point was found early in warmup.
+
+    **Conclusion:** adapt_diag warmup drives chains to the ridge and the adapted mass
+    matrix locks them in. The chains start near truth (r≈1, sigma_x≈0.03) but warmup
+    carries them to the ridge; subsequent draws can't escape. The amplitude failure is
+    run-to-run unstable, independent of divergence count, and worsens with more tune
+    steps — all signatures of mass-matrix-reinforced warmup drift. The fixed-sigma
+    result (finding 9, seed=0, r=0.961, 8 div) proves the correct mode is reachable
+    when the ridge is removed. The fix must target warmup initialization.
+
+    **Recommended next fix:** run a fixed-sigma fit (seed=0, which reliably converges)
+    and use its trajectory posterior means as initvals for the full free-sigma model.
+    Alternatively, use `pm.find_MAP()` to locate the MAP before sampling. Either
+    approach prevents warmup drift by starting at a point already near the true mode,
+    so the mass matrix adapts to the correct geometry. The fixed-sigma phase must use
+    seed=0 (or check for convergence and retry) since fixed-sigma is itself
+    initialization-sensitive.
 
 ## Design decisions / deviations from the literal spec (for the final report)
 
