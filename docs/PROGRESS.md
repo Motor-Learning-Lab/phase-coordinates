@@ -39,20 +39,24 @@ pred[t] =
 
 where `k` is the cycle containing `t`.
 
-## Active specification
+## Active specification and prompt
 
-The active spec is now:
+The active spec is:
 
 ```text
 docs/bayesian_two_layer_spec.md
 ```
 
-It has been rewritten for the cycle-fixed geometry model.
-
-A short design note should also be added during implementation:
+The active design note is:
 
 ```text
 docs/cycle_fixed_geometry_model.md
+```
+
+The implementation handoff prompt is:
+
+```text
+docs/claude_cycle_fixed_geometry_prompt.md
 ```
 
 ## Core modeling requirements
@@ -167,11 +171,21 @@ few or no divergences
 no catastrophic chain split
 ```
 
-## Stale work from source branch
+## Stale work removed from this branch
 
-The source branch contained many debugging artifacts for the full instantaneous-geometry model. They are not the active direction here.
+The source branch contained debugging artifacts for the full instantaneous-geometry model. Those are no longer the active direction here.
 
-On this branch, stale prompt/review/debug files from the instantaneous-geometry effort should be removed or ignored so future agents do not follow the wrong trail.
+Removed from this branch:
+
+```text
+docs/claude_bayesian_two_layer_prompt.md
+docs/claude_layer2_reparameterization_prompt.md
+docs/claude_followup_current_model_diagnostics.md
+docs/layer2_amplitude_diagnostics_review.md
+docs/debug/scripts/diagnose_layer2_amplitude.py
+docs/debug/logs/11_layer2_amplitude_diagnostics.log
+docs/debug/logs/12_layer2_current_model_diagnostics.log
+```
 
 The old branch remains available for that history.
 
@@ -179,8 +193,10 @@ The old branch remains available for that history.
 
 - [x] Branch created from `bayesian-two-layer-estimator`.
 - [x] Specification rewritten for cycle-fixed geometry.
-- [ ] Add `docs/cycle_fixed_geometry_model.md` design note.
-- [ ] Remove stale source-branch work files that are misleading for this branch.
+- [x] Added `docs/cycle_fixed_geometry_model.md` design note.
+- [x] Added `docs/claude_cycle_fixed_geometry_prompt.md` implementation prompt.
+- [x] Removed stale source-branch work files that were misleading for this branch.
+- [x] Updated `docs/debug/README.md` for cycle-fixed work.
 - [ ] Implement `_fit_layer2_cycle_fixed_geometry`.
 - [ ] Add `docs/debug/scripts/test_layer2_cycle_fixed.py`.
 - [ ] Run fixed-plane synthetic test.
