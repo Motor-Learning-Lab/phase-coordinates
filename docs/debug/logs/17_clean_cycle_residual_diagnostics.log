@@ -1,0 +1,195 @@
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 3 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [sigma_c, c_k, sigma_log_R, log_R_k, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 4 seconds.
+There were 20 divergences after tuning. Increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+======================================================================
+DIAGNOSTIC: Clean complete-cycle residual inflation
+Reproducing Scenario 1 from test_cycle_fixed_synthetic_suite.py
+seed=1, tune=400, draws=400, chains=2, target_accept=0.9
+======================================================================
+
+Data shape: (600, 3)  fs=100.0  tau_idx_hint: [0, 100, 200, 300, 400, 500, 600]
+True normal: [ 0.        -0.5        0.8660254]
+True e1:     [1. 0. 0.]
+True e2:     [0.        0.8660254 0.5      ]
+
+R_X=0.9995  T0=1.0000s  xbar=[-0.00655022  0.00284046  0.00116088]
+
+======================================================================
+2. DETERMINISTIC BASELINE RESIDUALS (A–D)
+======================================================================
+  A (true c=0, true frame, true phase): total=0.0203  normal=0.0212  cyclic=0.0199  tangential=0.0198
+  B (true c=0, noisy anchors/exact tau): total=0.0272  normal=0.0307  cyclic=0.0199  tangential=0.0297
+  e1 cos_sim with true_e1: 0.9988–0.9999
+  e2 cos_sim with true_e2: 0.9985–1.0000
+  n  cos_sim with true_n : 0.9987–0.9999
+  C (sample-mean c, noisy anchors/exact tau): total=0.0269  normal=0.0303  cyclic=0.0198  tangential=0.0294
+  per-cycle center norms: [0.005, 0.0028, 0.0036, 0.0038, 0.0027, 0.0037]
+  D (sample-mean c, true frame, true phase): total=0.0202  normal=0.0210  cyclic=0.0198  tangential=0.0198
+
+  Interpretation:
+    A ~ noise floor: 0.0203  (should be ~0.020)
+    B–A gap (anchor error): 0.0069
+    C–B gap (center-shift effect): -0.0003
+    model sigma_x from log 16: 0.0449  (gap from A: 0.0246)
+
+======================================================================
+
+Running Layer 1...
+======================================================================
+Layer 1 took 3.7s
+
+======================================================================
+3. LAYER 1 TAU DRIFT
+======================================================================
+              tau_hint    tau_mean    drift_s   drift_samp   tau_sd_s  tau_sd_samp
+  tau[0]:      0.0000     -0.0483    -0.0483        -4.83     0.0402         4.02
+  tau[1]:      1.0000      0.9963    -0.0037        -0.37     0.0032         0.32
+  tau[2]:      2.0000      1.9985    -0.0015        -0.15     0.0044         0.44
+  tau[3]:      3.0000      2.9996    -0.0004        -0.04     0.0043         0.43
+  tau[4]:      4.0000      3.9953    -0.0047        -0.47     0.0030         0.30
+  tau[5]:      5.0000      4.9970    -0.0030        -0.30     0.0049         0.49
+  tau[6]:      6.0000      6.0466    +0.0466        +4.66     0.0441         4.41
+
+              T_mean    T_hint   T_error_s  T_error_samp
+  T[0]:     1.0446    1.0000     +0.0446         +4.46
+  T[1]:     1.0022    1.0000     +0.0022         +0.22
+  T[2]:     1.0011    1.0000     +0.0011         +0.11
+  T[3]:     0.9957    1.0000     -0.0043         -0.43
+  T[4]:     1.0017    1.0000     +0.0017         +0.17
+  T[5]:     1.0496    1.0000     +0.0496         +4.96
+
+  Max |drift| in samples: 4.83
+  RMS drift in samples  : 2.55
+
+======================================================================
+4. BOUNDARY-CLUSTERING LIKELIHOOD: tau_hint vs tau_mean
+======================================================================
+  Posterior mean mu_tau  : [ 0.99422382 -0.01224928 -0.0040344 ]
+  Posterior mean rho_tau : 0.0223
+  sigma_tau_x (R_X*rho)  : 0.0223  (R_X=0.9995)
+
+  Log-lik at tau_hint    : -9.45
+  Log-lik at tau_mean    : -2.54
+  Difference (mean−hint) : 6.90
+  => Layer 1 boundary clustering prefers tau_mean over tau_hint
+
+  ||X(tau_hint) - mu_tau|| per boundary: [0.0123, 0.0508, 0.0326, 0.007, 0.062, 0.0353, 0.0221]
+  ||X(tau_mean) - mu_tau|| per boundary: [0.0123, 0.007, 0.0323, 0.0075, 0.0226, 0.0154, 0.0221]
+
+======================================================================
+
+Running Layer 2...
+======================================================================
+
+Pre-sampling oriented frame (Layer 2 prior means):
+   cyc   dot(e1,e2)    |e1|    |e2|     |n|  orient_score   a90_orth_norm
+     0      -0.0000  1.0000  1.0000  1.0000        0.9711          0.9785
+     1       0.0000  1.0000  1.0000  1.0000        0.9995          0.9945
+     2       0.0000  1.0000  1.0000  1.0000        0.9996          1.0123
+     3      -0.0000  1.0000  1.0000  1.0000        0.9999          1.0170
+     4       0.0000  1.0000  1.0000  1.0000        0.9996          1.0120
+     5       0.0000  1.0000  1.0000  1.0000        0.9998          1.0283
+
+Layer 2 took 5.1s
+
+  sigma_x mean=0.0449  [true=0.020]  factor=2.2x
+  Divergences: 20
+
+======================================================================
+5. RESIDUALS: tau_hint vs tau_mean PHASE (E–H)
+======================================================================
+  E (tau_mean, post c_k/R_k, post z): total=0.0446  normal=0.0248  cyclic=0.0438  tangential=0.0586
+  F (tau_hint phase/anchors, post c_k/R_k, post z): total=0.0474  normal=0.0256  cyclic=0.0410  tangential=0.0664
+  G (tau_hint, c=0, R=1, z=0): total=0.0378  normal=0.0270  cyclic=0.0201  tangential=0.0561
+  H (tau_mean, c=0, R=1, z=0): total=0.0596  normal=0.0279  cyclic=0.0231  tangential=0.0967
+
+  tau_hint vs tau_mean effect on RMSE:
+    F (tau_hint) vs E (tau_mean): 0.0474 vs 0.0446  diff=+0.0028
+    G (tau_hint+ideal) vs H (tau_mean+ideal): 0.0378 vs 0.0596  diff=-0.0218
+
+  Center-shift effect (c=0 vs posterior c_k):
+    tau_hint: G=0.0378 vs F=0.0474  diff (c=0 is better if neg): -0.0096
+    tau_mean: H=0.0596 vs E=0.0446  diff (c=0 is better if neg): +0.0150
+
+======================================================================
+6. BEST PHASE OFFSET PER CYCLE (grid search)
+======================================================================
+  Grid: 1001 points in [-0.5, 0.5] rad
+
+   cyc  best_delta_rad  best_delta_samp   RMSE_cyc_before   RMSE_cyc_after   RMSE_tang_before   RMSE_tang_after
+     0         -0.0660            -1.05            0.0710           0.0677             0.0994            0.0743
+     1         -0.0040            -0.06            0.0215           0.0215             0.0216            0.0212
+     2         +0.0010            +0.02            0.0179           0.0179             0.0204            0.0203
+     3         -0.0020            -0.03            0.0200           0.0200             0.0217            0.0216
+     4         -0.0050            -0.08            0.0221           0.0221             0.0196            0.0190
+     5         +0.0590            +0.94            0.0693           0.0664             0.0950            0.0744
+
+  Mean tangential RMSE before phase offset: 0.0463
+  Mean tangential RMSE after  phase offset: 0.0385
+  Mean cyclic    RMSE before phase offset: 0.0370
+  Mean cyclic    RMSE after  phase offset: 0.0359
+  Tangential RMSE reduction by phase offset: 16.9%
+
+======================================================================
+7. PER-CYCLE RESIDUAL AUDIT
+======================================================================
+   cyc   RMSE_tot   RMSE_nrm   RMSE_cyc   RMSE_tan   c_norm      R_k   z_rms   tau_start_err   tau_end_err   T_err_samp
+     0     0.0721     0.0257     0.0710     0.0994   0.0912   1.0004  0.0187           -4.83         -0.37        +4.46
+     1     0.0222     0.0234     0.0215     0.0216   0.0109   0.9981  0.0098           -0.37         -0.15        +0.22
+     2     0.0222     0.0274     0.0179     0.0204   0.0061   0.9975  0.0015           -0.15         -0.04        +0.11
+     3     0.0217     0.0232     0.0200     0.0217   0.0082   1.0029  0.0064           -0.04         -0.47        -0.43
+     4     0.0234     0.0277     0.0221     0.0196   0.0090   1.0022  0.0109           -0.47         -0.30        +0.17
+     5     0.0689     0.0204     0.0693     0.0950   0.0864   0.9967  0.0181           -0.30         +4.66        +4.96
+
+======================================================================
+8. DIVERGENCE LOCALIZATION
+======================================================================
+  Total divergences: 20
+  Divergence rate: 20/800 = 2.50%
+  sigma_x                       :  divergent mean=0.0448  non-div mean=0.0449  diff=-0.0001
+  sigma_log_R                   :  divergent mean=0.0005  non-div mean=0.0024  diff=-0.0019
+  mean c_k norm                 :  divergent mean=0.0180  non-div mean=0.0187  diff=-0.0007
+  R_k[0]                        :  divergent mean=1.0017  non-div mean=1.0003  diff=+0.0014
+  R_k[1]                        :  divergent mean=0.9977  non-div mean=0.9981  diff=-0.0004
+  R_k[2]                        :  divergent mean=0.9972  non-div mean=0.9975  diff=-0.0003
+  R_k[3]                        :  divergent mean=1.0033  non-div mean=1.0029  diff=+0.0004
+  R_k[4]                        :  divergent mean=1.0021  non-div mean=1.0023  diff=-0.0001
+  R_k[5]                        :  divergent mean=0.9972  non-div mean=0.9967  diff=+0.0005
+  sigma_c[0]                    :  divergent mean=0.0384  non-div mean=0.0359  diff=+0.0025
+  sigma_c[1]                    :  divergent mean=0.0369  non-div mean=0.0352  diff=+0.0017
+  sigma_c[2]                    :  divergent mean=0.0205  non-div mean=0.0198  diff=+0.0006
+  h_z_knots rms                 :  divergent mean=0.0154  non-div mean=0.0150  diff=+0.0004
+
+======================================================================
+SUMMARY AND DIAGNOSIS
+======================================================================
+
+  Most likely causes of sigma_x inflation (ranked):
+
+  See diagnostics above:
+  1. If best_phase_offset diagnostic removes most tangential RMSE:
+       => Layer 1 tau drift / phase misalignment is primary cause
+  2. If tau_hint gives lower RMSE than tau_mean (G < H or F < E):
+       => Layer 1 boundary sampling moves tau away from true boundaries
+  3. If baseline B–A gap >> 0 and > 50% of total surplus RMSE:
+       => Single-sample noisy anchor is contributing
+  4. If center forced to 0 gives lower RMSE (G < F or H < E):
+       => center compensation is harmful for clean data
+  5. If divergences concentrate in c_k or z regions:
+       => geometry of center/z coupling needs reparameterization
+
+  Recommended next model change (do not implement — diagnostics only):
+  If tau drift is primary: consider fixing tau to tau_hint in Layer 2,
+  or adding a tighter tau prior / passing tau_hint directly to Layer 2.
