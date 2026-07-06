@@ -1,0 +1,239 @@
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, u, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 2 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [c2, delta_n, a2, q_knots, h_r_knots, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 433 seconds.
+There were 40 divergences after tuning. Increase `target_accept` or reparameterize.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+======================================================================
+LAYER 2 CURRENT-MODEL COMPONENT DIAGNOSTICS
+======================================================================
+True normal  : [ 0.        -0.5        0.8660254]
+True radius  : 1.0
+True sigma_x : 0.02
+
+R_X = 1.0017   T0 = 1.0000s   tau_idx = [ 36 134 233 333 435 535 595]
+
+Layer 1 took 3.0s
+Layer 2 took 436.5s
+
+Posterior: 2 chains × 400 draws = 800 samples
+Fit window: t=[0.310, 5.990]s   n_time_fit=569
+
+----------------------------------------------------------------------
+DIAGNOSTIC A: Chain quality
+----------------------------------------------------------------------
+
+Divergences per chain:
+  Chain 0: 0 divergences,  0 max-treedepth hits (depth>=10)
+  Chain 1: 40 divergences,  378 max-treedepth hits (depth>=10)
+  Total  : 40 divergences
+
+Rhat and ESS (free variables):
+  az.summary failed: Unknown format code 'f' for object of type 'str'
+  Manual rhat for rho_x:
+  rho_x manual rhat = 27.9271
+
+Per-chain sigma_x (mean, median, 5%, 95%):
+  Chain 0: mean=0.5173  med=0.5178  [0.5024, 0.5348]
+  Chain 1: mean=0.2059  med=0.2057  [0.1975, 0.2142]
+
+Per-chain radius median-over-time (mean, median, 5%, 95%):
+  Chain 0: mean=0.5651  med=0.5631  [0.5165, 0.6234]
+  Chain 1: mean=1.5924  med=1.5917  [1.4628, 1.7102]
+
+----------------------------------------------------------------------
+DIAGNOSTIC B: Phase error to true synthetic phase
+----------------------------------------------------------------------
+
+Best phase offset (per-draw mean error):
+  Mean over draws : -1.7410 rad
+  SD over draws   : 0.0266 rad
+  Range           : [-1.7936, -1.6656] rad
+
+Wrapped phase error (after removing best constant offset):
+  Median abs error — mean over draws: 0.2042 rad  sd: 0.0479
+  95th pct abs error — mean: 0.9156 rad  sd: 0.1392
+
+Posterior-mean phase error (offset=-1.7410 rad):
+  Median abs: 0.1453 rad
+  Max abs   : 1.7047 rad
+  RMS       : 0.3698 rad
+
+Phase error by cycle (posterior mean, median abs within cycle):
+  Cycle 0: n= 99  median_abs=0.0833  max_abs=0.2068 rad
+  Cycle 1: n= 99  median_abs=0.2772  max_abs=0.3626 rad
+  Cycle 2: n=101  median_abs=0.0615  max_abs=0.1744 rad
+  Cycle 3: n=100  median_abs=0.0959  max_abs=0.1522 rad
+  Cycle 4: n= 97  median_abs=0.2312  max_abs=0.3331 rad
+  Cycle 5: n= 73  median_abs=0.7559  max_abs=1.7047 rad
+
+Phase error near boundaries (|err| within ±5 samples of tau_k):
+  tau_0 (t=0.303s): max|err|=0.20680 rad
+  tau_1 (t=1.296s): max|err|=0.18613 rad
+  tau_2 (t=2.288s): max|err|=0.10546 rad
+  tau_3 (t=3.291s): max|err|=0.16297 rad
+  tau_4 (t=4.295s): max|err|=0.18157 rad
+  tau_5 (t=5.269s): max|err|=0.15846 rad
+  tau_6 (t=6.050s): outside fit window
+
+Corr(|phase_error|, |residual_norm|) [posterior mean]: -0.0311
+
+----------------------------------------------------------------------
+DIAGNOSTIC C: Center cyclic amplitude
+----------------------------------------------------------------------
+
+Posterior-mean center:
+  center_rms         : 1.13355
+  center_drift (end-start): 1.94184
+  center cyclic projection RMS: 0.83734
+
+Center regression on cos/sin(phase) [posterior mean]:
+  center_x: amp=0.08387  (cos_coef=0.03269, sin_coef=-0.07724)
+  center_y: amp=0.09395  (cos_coef=-0.09215, sin_coef=0.01828)
+  center_z: amp=0.04152  (cos_coef=-0.04007, sin_coef=0.01087)
+  total center cyclic amplitude : 0.13261
+  / median radius               : 0.11810
+
+Per-draw center_rms:       mean=1.35898  sd=0.88815  [0.43812, 2.30281]
+Per-draw center_cyc_amp:   mean=1.26581  sd=0.89332  [0.34320, 2.21955]
+
+Corr(sigma_x, center_rms)        : -0.9987
+Corr(sigma_x, center_cyc_amp)    : -0.9987
+Corr(r_median, center_rms)       : 0.9951
+Corr(r_median, center_cyc_amp)   : 0.9951
+
+----------------------------------------------------------------------
+DIAGNOSTIC D: z / perpendicular compensation
+----------------------------------------------------------------------
+
+Per-draw z statistics:
+  median |z|         : mean=0.0849  sd=0.0235
+  95th pct |z|       : mean=0.2372
+  z_rms              : mean=0.1190  sd=0.0256
+  median |z/r|       : mean=0.0955  sd=0.0501
+  %% time |z/r|>0.25 : mean=10.9%%
+  %% time |z/r|>0.50 : mean=0.7%%
+
+Per-draw residual RMS decomposition:
+  RMSE total    : mean=0.6273  sd=0.2707  [true sigma=0.02]
+  RMSE normal   : mean=0.0734  sd=0.0224
+  RMSE cyclic   : mean=0.4878  sd=0.2056
+  RMSE tangential: mean=0.3870  sd=0.1760
+
+Posterior-mean residual RMS:
+  total=0.5560  normal=0.0384  cyclic=0.4189  tangential=0.3636
+  mean(resid_c) = -0.0179  [expected r_est - r_true = 0.1228]
+
+Corr(sigma_x, z_rms)         : -0.6112
+Corr(sigma_x, median|z/r|)   : 0.7483
+Corr(r_median, z_rms)        : 0.6075
+Corr(r_median, median|z/r|)  : -0.7466
+
+----------------------------------------------------------------------
+DIAGNOSTIC E: Corrected projected radius (subtract normal*z)
+----------------------------------------------------------------------
+
+Corrected projected radius (posterior median over draws):
+  median r_projected : 1.0946  [true=1.0]
+  mean r_projected   : 1.2196
+  5%, 95%            : [0.6593, 1.6206]
+  SD over draws      : 0.4327
+
+Posterior-mean r_projected over time:
+  median=0.3111  mean=0.3184  sd=1.0389  [true=1.0]
+  5%, 95%: [-1.6418, 2.3205]
+
+Corrected r_projected by cycle (posterior mean):
+  Cycle 0: n= 99  median=-0.2287  mean=-0.3663  sd=0.9950
+  Cycle 1: n= 99  median=-0.0496  mean=-0.1890  sd=0.7201
+  Cycle 2: n=101  median=1.2527  mean=0.9893  sd=1.0567
+  Cycle 3: n=100  median=0.8540  mean=0.9474  sd=0.8625
+  Cycle 4: n= 97  median=0.1177  mean=-0.0527  sd=0.9349
+  Cycle 5: n= 73  median=0.7587  mean=0.6383  sd=0.4545
+
+Corrected r_projected by phase bin (posterior mean, 8 bins of [0,2pi)):
+  [0.00,0.79): n=74  median=0.1161  mean=0.0827
+  [0.79,1.57): n=71  median=0.1860  mean=-0.0435
+  [1.57,2.36): n=72  median=0.1152  mean=0.1867
+  [2.36,3.14): n=72  median=0.4577  mean=0.7664
+  [3.14,3.93): n=69  median=0.4250  mean=0.5786
+  [3.93,4.71): n=72  median=0.3479  mean=0.3729
+  [4.71,5.50): n=69  median=0.2661  mean=0.3877
+  [5.50,6.28): n=70  median=0.3283  mean=0.2285
+
+Corr(r_projected_t, fitted_radius_t) [posterior mean]: 0.0082
+Best scalar alpha (r_proj ≈ alpha * r_fitted): 0.1994
+RMSE at alpha=1 (r_proj vs r_fitted)         : 1.5582
+RMSE at best alpha                           : 1.0480
+
+Projected-radius error |median(r_proj) - 1.0|:
+  mean=0.4307  median=0.4088  sd=0.1244
+
+----------------------------------------------------------------------
+DIAGNOSTIC F: sigma_x correlation table (per-draw)
+----------------------------------------------------------------------
+
+Top 15 |corr| with sigma_x:
+   2. log_sigma_x                          r=+0.9998
+   3. RMSE                                 r=+0.9990
+   4. RMSE_cyclic                          r=+0.9988
+   5. RMSE_tangential                      r=+0.9988
+   6. center_cyclic_amp                    r=-0.9987
+   7. center_rms                           r=-0.9987
+   8. radius_sd_over_time                  r=-0.9986
+   9. radius_mean                          r=-0.9985
+  10. projected_radius_median              r=-0.9954
+  11. radius_median                        r=-0.9931
+  12. projected_radius_error               r=-0.9434
+  13. RMSE_normal                          r=+0.8547
+  14. phase_error_median                   r=-0.7770
+  15. median_abs_z_over_radius             r=+0.7483
+  16. z_rms                                r=-0.6112
+
+Top 15 |corr| with log(sigma_x):
+   2. sigma_x                              r=+0.9998
+   3. RMSE                                 r=+0.9992
+   4. RMSE_cyclic                          r=+0.9991
+   5. center_cyclic_amp                    r=-0.9991
+   6. center_rms                           r=-0.9990
+   7. radius_sd_over_time                  r=-0.9989
+   8. radius_mean                          r=-0.9989
+   9. RMSE_tangential                      r=+0.9989
+  10. projected_radius_median              r=-0.9959
+  11. radius_median                        r=-0.9934
+  12. projected_radius_error               r=-0.9460
+  13. RMSE_normal                          r=+0.8551
+  14. phase_error_median                   r=-0.7788
+  15. median_abs_z_over_radius             r=+0.7478
+  16. z_rms                                r=-0.6129
+
+======================================================================
+SUMMARY
+======================================================================
+
+Fit quality (free sigma_x, seed=0):
+  Divergences     : 40
+  sigma_x         : 0.3616 mean  (true=0.02, factor 18.1x too large)
+  radius median   : 1.0496  (true=1.0)
+  normal cos_sim  : min=0.9893  med=0.9974
+
+Key component findings:
+  Ridge corr(sigma_x, r_median)           : -0.9931
+  Phase error RMS (posterior mean)         : 0.3698 rad
+  Center cyclic amplitude / radius         : 0.11810
+  z_rms (posterior mean)                   : 0.0630
+  Corrected r_projected (posterior mean)   : 0.3111  (true=1.0)
+  Best alpha (r_proj ≈ alpha*r_fitted)     : 0.1994
+  RMSE cyclic (per-draw mean)              : 0.4878  (>> true sigma)
+  RMSE normal (per-draw mean)              : 0.0734
+
+ALL DIAGNOSTICS COMPLETE

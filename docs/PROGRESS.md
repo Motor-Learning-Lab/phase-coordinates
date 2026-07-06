@@ -15,9 +15,9 @@ python for everything**, not the `python` on PATH.
 ## Status as of last update (2026-07-06)
 
 **Reparameterization complete; a2_init fixes applied; amplitude-noise ridge
-diagnosed in detail. Root cause: adapt_diag warmup drifts to wrong mode and
-the adapted mass matrix locks it in. Fix identified: initialize from MAP or
-from a fixed-sigma fit (seed=0).**
+diagnosed in full detail (findings 12–13). Root cause: center/orbit confounding
+drives the failure — the center absorbs orbital motion and trades off against
+radius and sigma_x as a three-way confound.**
 
 The full reparameterization (tangent-plane normals + boundary-normalized phase)
 eliminated divergences and the localized normal artifact. Amplitude parameters
@@ -40,13 +40,22 @@ divergences, radius median 1.123, sigma_x 0.362. sigma_x is still ~18x ground tr
 carries them to the ridge (corr = -0.993, stuck from draw 1, zero draws near true
 mode). The amplitude is run-to-run unstable — different wrong ridge points each run
 (r=0.709/0.88/1.12/1.25 across logs 08–11). True mode is 4763 nats better than the
-posterior mean but never found. Fixed sigma_x (seed=0) reaches r=0.961 in 8 div
-(finding 9), confirming the correct mode exists; the obstacle is warmup, not geometry.
+posterior mean but never found.
 
-**Next step:** initialize the free-sigma fit from a fixed-sigma (seed=0) run or from
-`pm.find_MAP()`. See finding 12 for full evidence and recommendation.
+**Diagnosed (finding 13, log 12):** full A–F component diagnostic pass. The dominant
+confound is center/orbit: posterior-mean center_rms = 1.134 (comparable to orbit radius
+1.0), and corr(sigma_x, center_rms) = -0.999 — the strongest non-trivial correlate of
+sigma_x. Phase error and z-compensation are secondary (RMS 0.370 rad, corr -0.777;
+z_rms 0.119, corr -0.611). Per-draw corrected projected radius = 1.095 (self-consistent
+within each draw), but posterior-mean r_projected = 0.311 (meaningless average across
+incompatible chains). Decision criterion satisfied: "If center cyclic amplitude is large
+or correlates with sigma_x: focus on center/radius confounding."
 
-**See "Layer 2 findings" items 4-12 for the detailed evidence trail.**
+**Next step:** constrain center/orbit confounding — the center prior (sigma_c2) is likely
+too wide, allowing the center to absorb orbital motion. See finding 13 for full evidence
+and the decision criterion from `docs/layer2_amplitude_diagnostics_review.md`.
+
+**See "Layer 2 findings" items 4–13 for the detailed evidence trail.**
 
 **Environment**: a new pixi environment is now set up for this project
 (`pixi.toml` at the repo root). Use `pixi run python <script>` or
@@ -659,6 +668,72 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
     so the mass matrix adapts to the correct geometry. The fixed-sigma phase must use
     seed=0 (or check for convergence and retry) since fixed-sigma is itself
     initialization-sensitive.
+
+13. **Full component diagnostic pass confirms center/orbit confounding as
+    dominant failure (2026-07-06, log 12).**
+    `docs/debug/scripts/diagnose_layer2_amplitude.py` was rewritten to run
+    the 6 diagnostics (A–F) specified in `docs/claude_followup_current_model_diagnostics.md`
+    on the current free-sigma model only. No model variants were run.
+
+    **Diagnostic A — Chain quality:**
+    - Chain 0: 0 divergences, 0 max-treedepth hits; Chain 1: 40 divergences, **378/400
+      draws (94.5%) hit max treedepth** — Chain 1 is essentially immobile
+    - rho_x manual rhat = **27.93** (catastrophically non-converged)
+    - Per-chain sigma_x: Chain 0 mean=0.517, Chain 1 mean=0.206
+    - Per-chain radius: Chain 0 mean=0.565, Chain 1 mean=1.592
+
+    **Diagnostic B — Phase error:**
+    - Best constant offset = -1.741 rad (convention/origin only, not a problem)
+    - Posterior-mean wrapped phase error RMS = 0.370 rad; median abs = 0.145 rad
+    - Per-cycle: cycles 0–4 have median_abs 0.06–0.28 rad; cycle 5 median_abs 0.756 rad
+      (last cycle, inside fit window but near end — likely chain-averaging artifact)
+    - Phase-boundary max errors: ≤ 0.21 rad at all boundaries (good)
+    - Corr(|phase_error|, |residual|) = -0.031 (essentially zero — phase error not
+      the primary residual driver)
+
+    **Diagnostic C — Center cyclic amplitude:**
+    - Posterior-mean center_rms = **1.134** (nearly equal to orbit radius 1.0)
+    - center_drift (end-start) = 1.942 (center moves nearly 2 units across window)
+    - Per-draw center_rms: mean=1.359, sd=0.888, range=[0.438, 2.303]
+    - **corr(sigma_x, center_rms) = -0.999** — strongest non-trivial correlate of sigma_x
+    - corr(sigma_x, center_cyc_amp) = -0.999 — center cyclic projection equally strong
+    - This satisfies the review doc decision criterion: "If center cyclic amplitude is
+      large or correlates with sigma_x: focus on center/radius confounding."
+
+    **Diagnostic D — z/perpendicular compensation:**
+    - z_rms = 0.119 (posterior mean), median|z/r| = 0.096, 11% of time |z/r| > 0.25
+    - corr(sigma_x, z_rms) = -0.611, corr(sigma_x, median|z/r|) = +0.748 (secondary)
+    - RMS residual decomposition: total=0.556, normal=0.038, cyclic=0.419, tangential=0.364
+      (residuals are overwhelmingly in-plane, not normal — confirming an in-plane modeling
+      error, not a normal direction problem)
+
+    **Diagnostic E — Corrected projected radius (subtract normal×z):**
+    - Per-draw r_projected median = **1.095** (close to true 1.0) — each draw is
+      self-consistent within itself
+    - Posterior-mean r_projected = 0.311 — meaningless average across incompatible chains
+    - corr(r_projected_t, fitted_radius_t) = 0.008 (essentially zero — posterior mean
+      mixes two incompatible trajectories)
+    - Best scalar alpha (r_proj ≈ alpha × r_fitted) = 0.199 — posterior-mean fitted
+      radius predicts only 20% of the actual projected displacement
+
+    **Diagnostic F — sigma_x correlation table:**
+    Top correlates of sigma_x (per-draw): center_cyc_amp (-0.999), center_rms (-0.999),
+    RMSE (+0.999), RMSE_cyclic (+0.999), radius_mean (-0.999), radius_sd (-0.999),
+    r_projected_median (-0.995), phase_error_median (-0.777), median|z/r| (+0.748),
+    z_rms (-0.611).
+
+    **Interpretation:** the center/orbit confound is decisive. The center prior
+    (sigma_c2) is apparently wide enough to allow the center to absorb substantial
+    orbital motion. Chain 0 (sigma_x≈0.52, r≈0.57) has a large wandering center and
+    a small orbit; Chain 1 (sigma_x≈0.21, r≈1.59) has a smaller center displacement
+    and a large orbit. Both are on the same sigma_x × radius ≈ const ridge, with center
+    freely trading against both. This is a three-way confound: center, radius, sigma_x.
+
+    **Recommended next step:** constrain the center prior. The current c2 prior
+    (sigma_c2) may allow center trajectories that span the full orbit diameter. A
+    tighter or data-informed center prior should break the three-way confound. Before
+    changing the model, confirm what sigma_c2 is and what scale it implies for allowed
+    center motion.
 
 ## Design decisions / deviations from the literal spec (for the final report)
 
