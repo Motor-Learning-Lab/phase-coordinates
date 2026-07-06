@@ -200,7 +200,8 @@ The old branch remains available for that history.
 - [x] Implemented cycle-fixed `_fit_layer2` in `phase_coordinates/bayesian.py`.
 - [x] Added `docs/debug/scripts/test_layer2_cycle_fixed.py`.
 - [x] Run fixed-plane synthetic test (log 13) — see finding 1 below.
-- [ ] Fix amplitude/noise ridge in R_k/sigma_x space.
+- [x] Per-chain analysis of sigma_x and R_k posteriors — see finding 2.
+- [ ] Run fixed-sigma_x diagnostic to test whether R_k converges with amplitude/noise coupling removed.
 - [ ] Decide whether to expose the new model through public API.
 
 ## Findings
@@ -253,3 +254,58 @@ ridge before the prior can anchor R_k, or (b) a stronger/different prior is
 needed. Recommended next diagnostic: check whether the two chains are sitting
 at different (sigma_x, R_k) points (bimodal failure, as in the old model) or
 the same wrong point (unimodal wrong mode).
+
+### Finding 2: Per-chain analysis — unimodal wrong mode (2026-07-06, log perchain_sigma)
+
+Per-chain statistics (400 draws each, seed=0, same run as finding 1):
+
+```
+Chain 0: sigma_x mean=0.5906  94%HDI=[0.5726, 0.6116]
+Chain 1: sigma_x mean=0.5907  94%HDI=[0.5701, 0.6087]  [true=0.02]
+
+Chain 0: R_k = [0.218 0.218 0.218 0.218 0.214 0.214]  median=0.2175
+Chain 1: R_k = [0.218 0.215 0.218 0.218 0.215 0.218]  median=0.2176  [true=1.0]
+
+Chain 0: log_R_k = [-1.537 -1.540 -1.539 -1.537 -1.557 -1.564]
+Chain 1: log_R_k = [-1.537 -1.550 -1.535 -1.539 -1.554 -1.541]
+
+Chain 0: sigma_log_R mean=0.3348  94%HDI=[0.3014, 0.3649]
+Chain 1: sigma_log_R mean=0.3343  94%HDI=[0.3037, 0.3635]  [prior scale=0.03]
+```
+
+**Both chains landed at the same wrong mode** — this is a unimodal failure. The
+old instantaneous-geometry model split chains between two modes. Here the chains
+agree, but agree on the wrong answer with extremely tight HDIs. This rules out
+a simple bimodal label-switching explanation.
+
+**sigma_log_R interpretation:** `sigma_log_R` is the hierarchical variability of
+log-radius _across_ cycles, not the likelihood noise scale. With `log_R_k ≈ -1.54`
+for all six cycles (versus initval ≈ 0 = log(1.0)), sigma_log_R inflates from its
+prior scale of 0.03 to ≈0.335 (≈11× prior SDs) to accommodate the deviation of
+log_R_k from its prior mean. The amplitude failure is a property of `log_R_k`
+itself; sigma_log_R is a symptom, not a cause.
+
+**Ridge-drift hypothesis examined and rejected.** The initial hypothesis was that
+NUTS drifts along the R_k/sigma_x product ridge during warmup before the prior
+anchors R_k. This explanation is incorrect:
+
+- At the true mode (R_k=1, sigma_x=0.02), the log-posterior gradient is zero by
+  definition — it is a maximum.
+- At a small perturbation away from the true mode, the gradient points back toward
+  it. The prior and likelihood both favor R_k ≈ 1 near that region.
+- NUTS follows the gradient — it does not drift along flat ridges. In ordinary
+  regression, `beta` does not drift to 0 and `sigma_y` does not inflate despite the
+  same algebraic ridge existing there.
+- Therefore warmup drift is not the mechanism. The model finds the wrong mode
+  through some other means.
+
+**Root cause is currently unknown.** Despite initvals set to `log_R_k ≈ 0`
+(i.e., R_k=1), both chains converge to `log_R_k ≈ -1.54`. The geometry
+diagnostics (normal cos_sim, center norms, z_rms) all pass — the failure is
+isolated to the amplitude parameters. Why the sampler preferentially ends up at
+this wrong mode is not yet understood.
+
+**Next experiment:** Fix `sigma_x` at the true value (0.02) and check whether
+`R_k` recovers. This isolates whether the geometry, initvals, and prior hierarchy
+are correct — only the amplitude coupling is removed. If R_k recovers to 1.0 under
+fixed sigma_x, the failure is entirely in the amplitude/noise coupling.
