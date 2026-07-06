@@ -574,6 +574,59 @@ patterns (`post["var"].mean(("chain","draw")).values`) still work unchanged.
     Or: a log-likelihood slice over (radius, sigma_x) with all geometry fixed, to
     confirm the ridge shape and magnitude directly.
 
+12. **Amplitude diagnostics confirm warmup failure; trajectory direction is
+    also wrong (2026-07-06, log 11).**
+    `docs/debug/scripts/diagnose_layer2_amplitude.py` ran 7 diagnostics on the
+    current model (draws=400/tune=400/chains=2/seed=0). Key numbers:
+
+    **Free-sigma fit** (442s, 40 divergences — same as previous):
+    - sigma_x_mean = 0.362 (18×true); r_median = 1.123; r×sigma = 0.406 (vs true 0.020)
+    - Pearson corr(sigma_x, r_median) = **-0.993** — ridge confirmed, extremely tight
+    - r×sigma range [0.249, 0.363], SD/mean = 0.078 — the two dimensions trade off
+      almost perfectly while the product stays constant
+
+    **Chains stuck from draw 1 (Diagnostic 5):**
+    - Chain 0: sigma_x ∈ [0.503, 0.542], r ∈ [0.505, 0.654] in first AND last 50 draws
+    - Chain 1: sigma_x ∈ [0.202, 0.218], r ∈ [1.496, 1.618] in first AND last 50 draws
+    - **Zero** draws from either chain have sigma_x < 4×true = 0.08
+    - The two chains landed on completely different points on the same ridge during
+      warmup and never moved. No exploration across the ridge or toward the true mode.
+
+    **True mode is far better but never found (Diagnostic 7):**
+    - log-lik at true params: +4258 nats
+    - log-lik at posterior mean: -505 nats — gap of **4763 nats**
+    - The wrong mode is not a nearby local optimum; it is qualitatively worse
+    - Ridge scan (all points at r×sigma ≈ 0.406): log-lik ranges from -2224 to -75000
+      — the entire ridge is far below the true mode. NUTS is not in a competing local
+      posterior mode; it is simply far from the posterior.
+
+    **Trajectory direction also wrong (Diagnostics 2, 6):**
+    - MLE sigma for posterior-mean trajectory = 0.321 (true 0.02): the
+      posterior-mean trajectory does not fit the data at the true noise level —
+      confirming the trajectory itself (not just scale) is off
+    - OLS radius from posterior trajectory direction = 1.22 (true 1.0), SD = 0.73
+    - RMS cyclic residual = 0.42, RMS tangential = 0.36 (should both be ~0.02)
+
+    **Fixed-sigma fit (seed=42): 458 divergences, cos_sim 0.21 — seed-specific
+    failure.** This contradicts finding 9 (seed=0, fixed sigma_x → 8 div, radius
+    0.961, all checks passed). The fixed-sigma MODEL is structurally fine; seed=42
+    happens to start the warmup in a bad region where sigma_x=0.02 creates enormous
+    gradients (steep walls) before the trajectory has found the orbital plane. This
+    run added ~8 min of compute and is the one result that is not diagnostic —
+    see user feedback on diagnostic script design.
+
+    **Conclusion:** adapt_diag warmup drives both chains to the wrong mode and the
+    adapted mass matrix then locks them in. The chains start near the truth (r≈1,
+    sigma_x≈0.03), but warmup carries them onto the ridge and traps them there. The
+    fixed-sigma result (finding 9, seed=0) proves the correct mode exists and is
+    reachable. The problem is purely about warmup finding it with free sigma_x.
+
+    **Recommended next fix:** initialize the free-sigma fit from the MAP point found
+    by gradient optimization (`pm.find_MAP()`), or from a quick fixed-sigma fit
+    (seed=0) whose trajectory posterior means are used as initvals for the full model.
+    Either approach prevents the warmup drift by starting at a point already on the
+    true posterior mode.
+
 ## Design decisions / deviations from the literal spec (for the final report)
 
 These are deliberate, reasoned engineering choices, not workarounds forced by

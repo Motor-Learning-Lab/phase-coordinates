@@ -1,0 +1,143 @@
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, u, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 2 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [c2, delta_n, a2, q_knots, h_r_knots, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 442 seconds.
+There were 40 divergences after tuning. Increase `target_accept` or reparameterize.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [c2, delta_n, a2, q_knots, h_r_knots, h_z_knots]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 493 seconds.
+There were 458 divergences after tuning. Increase `target_accept` or reparameterize.
+Chain 1 reached the maximum tree depth. Increase `max_treedepth`, increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+======================================================================
+LAYER 2 AMPLITUDE DIAGNOSTICS
+======================================================================
+True normal  : [ 0.        -0.5        0.8660254]
+True radius  : 1.0
+True sigma_x : 0.02
+
+R_X = 1.0017   tau_idx = [ 36 134 233 333 435 535 595]
+
+Layer 1 took 3.2s
+Layer 2 took 446.2s
+
+Posterior shape: 2 chains × 400 draws = 800 samples
+n_time_fit = 569
+Divergences: 40
+
+Posterior sigma_x : mean=0.3616  median=0.3533  sd=0.1559  [true=0.02]
+Posterior radius median: mean=1.0787  median=1.0496  sd=0.5169  [true=1.0]
+
+----------------------------------------------------------------------
+DIAGNOSTIC 1: Amplitude-noise ridge — (sigma_x, r_median) scatter
+----------------------------------------------------------------------
+r_median * sigma_x : mean=0.3100  sd=0.0242  true value=0.0200
+Pearson corr(sigma_x, r_median) = -0.9931  [ridge if |corr| >> 0.5]
+sigma_x percentiles ([5, 25, 50, 75, 95]): [0.1993 0.2057 0.3533 0.5178 0.53  ]
+r_median  percentiles ([5, 25, 50, 75, 95]): [0.525  0.5631 1.0496 1.5914 1.6907]
+r*sigma_x range: [0.2486, 0.3629]  (width/mean=0.078)
+
+----------------------------------------------------------------------
+DIAGNOSTIC 2: Likelihood geometry — OLS radius estimates
+----------------------------------------------------------------------
+OLS optimal radius (per draw) : mean=1.2243  median=1.2196  sd=0.7346  [true=1.0]
+Posterior radius mean         : 1.0787
+Ratio OLS/posterior           : 1.1620  [1.0 = trajectory is correct, only scale wrong]
+Fraction draws with OLS radius within 10% of true: 0.000
+
+----------------------------------------------------------------------
+DIAGNOSTIC 3: Fixed sigma_x fit (sigma_x = 0.02, no amplitude ridge)
+----------------------------------------------------------------------
+Fixed-sigma run took 496.3s
+Divergences       : 458
+Radius median     : mean=0.9216  median=0.9277  [true=1.0]
+sigma_x_mean      : 0.0200  [true=0.02]
+Normal cos_sim    : min=0.2077  median=0.5774
+Phase monotone    : True  min dphi=0.019438
+
+----------------------------------------------------------------------
+DIAGNOSTIC 4: Per-chain radius and sigma_x statistics
+----------------------------------------------------------------------
+  Chain 0: r_median  mean=0.5651  sd=0.0326  | sigma_x mean=0.5173  sd=0.0100  | r*sigma mean=0.2923
+  Chain 1: r_median  mean=1.5924  sd=0.0754  | sigma_x mean=0.2059  sd=0.0050  | r*sigma mean=0.3277
+
+----------------------------------------------------------------------
+DIAGNOSTIC 5: Trace trajectory for sigma_x and r_median
+----------------------------------------------------------------------
+  Chain 0 first 50 draws:  sigma_x [0.503, 0.542]  r [0.505, 0.654]
+  Chain 0 last  50 draws:  sigma_x [0.492, 0.544]  r [0.502, 0.646]
+  Chain 0 fraction draws sigma_x < 4*true (=0.08): 0.000
+  Chain 1 first 50 draws:  sigma_x [0.202, 0.218]  r [1.496, 1.618]
+  Chain 1 last  50 draws:  sigma_x [0.192, 0.210]  r [1.538, 1.745]
+  Chain 1 fraction draws sigma_x < 4*true (=0.08): 0.000
+
+----------------------------------------------------------------------
+DIAGNOSTIC 6: Residuals breakdown — trajectory vs amplitude error
+----------------------------------------------------------------------
+  RMS total residual           : 0.5560  [true sigma_x=0.02]
+  RMS residual (normal dir)    : 0.0384
+  RMS residual (cyclic dir)    : 0.4189
+  RMS residual (tangential)    : 0.3636
+
+  Expected cyclic residual from radius bias: r_true - r_est = -0.1228
+  Observed mean(resid_c) = -0.0179
+
+----------------------------------------------------------------------
+DIAGNOSTIC 7: Log-likelihood comparison — true vs estimated parameters
+----------------------------------------------------------------------
+  log-lik (true params, true sigma_x)         : 4258.0
+  log-lik (posterior mean, posterior sigma_x)  : -504.9
+  log-lik (fixed-sigma posterior mean, 0.02)   : 2462.3
+  log-lik (posterior mean, true sigma_x=0.02)  : -214777.4
+  gap (true - posterior)                       : 4762.9 nats
+  gap (true - fixed-sigma posterior)           : 1795.7 nats
+
+  MLE sigma_x for posterior-mean trajectory : 0.3210  [true=0.02]
+  MLE sigma_x for true trajectory           : 0.0200
+
+  Ridge scan (r * sigma ≈ 0.4060):
+   r_scale     r_val     sigma_x       log_lik
+      0.50    0.5614      0.7232       -2224.3
+      0.70    0.7860      0.5166       -3165.0
+      0.80    0.8983      0.4520       -4089.1
+      0.90    1.0105      0.4018       -5393.4
+      1.00    1.1228      0.3616       -7153.5
+      1.10    1.2351      0.3287       -9457.5
+      1.20    1.3474      0.3013      -12405.4
+      1.50    1.6842      0.2411      -26283.9
+      2.00    2.2456      0.1808      -74903.2
+
+======================================================================
+SUMMARY
+======================================================================
+
+Full-model fit (free sigma_x):
+  Divergences : 40
+  sigma_x     : 0.3616  [true=0.02]  factor=18.1x too large
+  radius med  : 1.1228  [true=1.0]
+  r*sigma     : 0.4060  [true=0.0200]
+  Normal cos_sim min : 0.9893
+
+Fixed-sigma_x fit (sigma_x = 0.02):
+  Divergences : 458
+  radius med  : 0.8817  [true=1.0]
+  Normal cos_sim min : 0.2077
+
+Ridge correlation (sigma_x vs r_median): -0.9931
+OLS radius (from trajectory direction): 1.2196  [quantifies whether trajectory direction is right]
+MLE sigma for posterior-mean trajectory: 0.3210  [should be ~0.02 if trajectory is correct]
+
+ALL DIAGNOSTICS COMPLETE
