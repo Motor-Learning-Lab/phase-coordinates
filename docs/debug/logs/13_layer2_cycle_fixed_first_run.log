@@ -1,0 +1,93 @@
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [tau, c, u, mu_tau, rho_tau]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 2 seconds.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+Initializing NUTS using adapt_diag...
+Sequential sampling (2 chains in 1 job)
+NUTS: [sigma_c, c_k, sigma_n_angle, delta_n, sigma_a, a_k, sigma_log_R, log_R_k, h_z_knots, rho_x]
+Sampling 2 chains for 400 tune and 400 draw iterations (800 + 800 draws total) took 19 seconds.
+There were 3 divergences after tuning. Increase `target_accept` or reparameterize.
+We recommend running at least 4 chains for robust computation of convergence diagnostics
+The rhat statistic is larger than 1.01 for some parameters. This indicates problems during sampling. See https://arxiv.org/abs/1903.08008 for details
+The effective sample size per chain is smaller than 100 for some parameters.  A higher number is needed for reliable rhat and ess computation. See https://arxiv.org/abs/1903.08008 for details
+tau_idx [ 36 134 233 333 435 535 595]
+Layer 1 took 3.3s
+Layer 2 took 22.1s
+
+======================================================================
+LAYER 2 CYCLE-FIXED GEOMETRY DIAGNOSTICS
+======================================================================
+True normal  : [ 0.        -0.5        0.8660254]
+True radius  : 1.0
+True sigma_x : 0.02
+R_X = 1.0017   T0 = 1.0000s   K_cyc = 6
+
+Divergences  : 3  ([1, 2] per chain)
+Max treedepth: 0  ([0, 0] per chain)
+
+sigma_x  mean=0.5907  median=0.5911  5%=0.5733  95%=0.6079  [true=0.02]
+
+R_k by cycle  [true=1.0]:
+  cycle 0: mean=0.2184  sd=0.0377
+  cycle 1: mean=0.2164  sd=0.0362
+  cycle 2: mean=0.2180  sd=0.0360
+  cycle 3: mean=0.2179  sd=0.0363
+  cycle 4: mean=0.2143  sd=0.0373
+  cycle 5: mean=0.2156  sd=0.0410
+
+Center norm by cycle  [true=0]:
+  cycle 0: ||c_k||=0.0416
+  cycle 1: ||c_k||=0.0515
+  cycle 2: ||c_k||=0.0562
+  cycle 3: ||c_k||=0.0765
+  cycle 4: ||c_k||=0.1054
+  cycle 5: ||c_k||=0.1888
+
+Normal cos_sim by cycle  [true=1.0]:
+  cycle 0: cos_sim=1.0000
+  cycle 1: cos_sim=1.0000
+  cycle 2: cos_sim=1.0000
+  cycle 3: cos_sim=1.0000
+  cycle 4: cos_sim=1.0000
+  cycle 5: cos_sim=1.0000
+  min=1.0000  median=1.0000
+
+z_rms (posterior mean) : 0.0044  [true~0]
+
+RMSE (posterior mean trajectory)  [true sigma=0.02]:
+  total=0.5904  normal=0.0207  cyclic=0.7418  tangential=0.7035
+
+Phase monotone: True  (min dphi=0.062536)
+
+Frame orthonormality:
+  ||e1|| range: [1.00000, 1.00000]
+  ||e2|| range: [1.00000, 1.00000]
+  max |e1·n|  : 5.55e-17
+  max |e2·n|  : 2.78e-17
+  max |e2 - cross(n,e1)|: 2.78e-17
+
+Hierarchical scales (posterior mean):
+  sigma_c       : [0.02469163 0.02177756 0.01615656]
+  sigma_log_R   : 0.3346
+  sigma_n_angle : 0.0210
+  sigma_a       : [0.10826565 0.04159996 0.01989704]
+
+======================================================================
+SUMMARY
+======================================================================
+  Divergences  : 3
+  sigma_x mean : 0.5907  [true=0.02, factor 29.5x]
+  R_k median   : 0.2172  [true=1.0]
+  normal cos_sim: min=1.0000  med=1.0000
+  RMSE total   : 0.5904  [true sigma=0.02]
+  RMSE cyclic  : 0.7418  RMSE normal: 0.0207
+  z_rms        : 0.0044
+Traceback (most recent call last):
+  File "/home/opher/Repositories/phase-coordinates/docs/debug/scripts/test_layer2_cycle_fixed.py", line 223, in <module>
+    main()
+  File "/home/opher/Repositories/phase-coordinates/docs/debug/scripts/test_layer2_cycle_fixed.py", line 209, in main
+    assert 0.7 < np.median(R_k_mean) < 1.3, \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: R_k median 0.217 outside [0.7, 1.3]

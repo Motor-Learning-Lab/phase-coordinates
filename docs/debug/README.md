@@ -42,6 +42,12 @@ frame orthonormality
 hierarchical scales: sigma_c, sigma_log_R, sigma_n_angle, sigma_a
 ```
 
+## Logs
+
+| File | Script | Config | Result |
+|---|---|---|---|
+| `13_layer2_cycle_fixed_first_run.log` | `test_layer2_cycle_fixed.py` | tune=400, draws=400, chains=2, target_accept=0.9, seed=0 | **3 divergences, 19s.** Normal cos_sim=1.0000 all cycles. Center norms 0.04–0.19 (confound eliminated). z_rms=0.004. BUT sigma_x=0.591 (30×true), R_k=0.217 (5×too small) — amplitude ridge persists in R_k/sigma_x space. Assertion on R_k median fails. See PROGRESS.md finding 1. |
+
 ## Legacy scripts
 
 Some older utility and Layer 1 debug scripts may still be useful as fixtures or examples, especially for synthetic data generation and Layer 1 sanity checks. But old scripts whose purpose was diagnosing the instantaneous `center(t)` / `normal(t)` / radius / `sigma_x` model should not guide the implementation on this branch.
