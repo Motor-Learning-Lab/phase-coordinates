@@ -6,14 +6,16 @@ Two peer algorithms are provided with a shared output interface. Both are experi
 
 ## Installation
 
+For local use (clone the repo first):
+
 ```bash
-pip install phase-coordinates
+pip install -e .
 ```
 
 For the Bayesian algorithm:
 
 ```bash
-pip install "phase-coordinates[bayes]"
+pip install -e ".[bayes]"
 ```
 
 ## Quick start
@@ -94,7 +96,7 @@ X_hat = reconstruct_phase_coordinates(samples, cycles)
 # NaN rows where reconstruction is not possible (outside fitted window or unfitted cycles).
 ```
 
-For 3-D input data and the PCA algorithm, reconstruction is exact to floating-point precision.
+`reconstruct_phase_coordinates` always returns a **(n_time, 3)** array. For 3-D input the reconstruction is exact to floating-point precision. For PCA inputs with more than 3 features, only the 3-PC projection is reconstructed; use `details["models"]` to reconstruct in the original feature space.
 
 ## Algorithm 1: fit_pca_phase_coordinates
 

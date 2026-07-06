@@ -36,10 +36,7 @@ from .core import (
     CYCLE_COLUMNS,
 )
 
-try:
-    from .bayesian import fit_bayesian_phase_coordinates
-except ImportError:
-    pass
+from .bayesian import fit_bayesian_phase_coordinates
 
 __all__ = [
     "hilbert_phase",

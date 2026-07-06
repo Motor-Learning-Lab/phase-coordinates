@@ -9,7 +9,7 @@ smoothly varying phase, center, normal, radius, and perpendicular deviation.
 
 This module is independent of :mod:`phase_coordinates.core` and does not
 replace :func:`phase_coordinates.core.hilbert_phase` or
-:func:`phase_coordinates.core.cycle_by_cycle_pca_coordinates`.
+:func:`phase_coordinates.core.fit_pca_phase_coordinates`.
 
 PyMC and ArviZ are optional dependencies. They are imported lazily so that
 importing this module (and the rest of ``phase_coordinates``) never requires
@@ -575,6 +575,10 @@ class _Layer2Summary:
     normal_angular_sd: np.ndarray
     e1_mean: np.ndarray
     e2_mean: np.ndarray
+    cycle_center_mean: np.ndarray      # (K_cyc, 3) posterior-mean c_k from Layer 2
+    cycle_e1_mean: np.ndarray          # (K_cyc, 3) frame from posterior-mean c_k + anchors
+    cycle_e2_mean: np.ndarray          # (K_cyc, 3)
+    cycle_normal_mean: np.ndarray      # (K_cyc, 3)
     boundary_direction_mean: np.ndarray
     projection_norm_mean: np.ndarray
     radius_mean: np.ndarray
@@ -832,6 +836,10 @@ def _fit_layer2(
         normal_angular_sd=normal_angular_sd,
         e1_mean=e1_mean,
         e2_mean=e2_mean,
+        cycle_center_mean=c_mean_cyc,
+        cycle_e1_mean=e1_cyc,
+        cycle_e2_mean=e2_cyc,
+        cycle_normal_mean=n_cyc,
         boundary_direction_mean=boundary_dir_mean,
         projection_norm_mean=projection_norm_mean,
         radius_mean=pmean("radius"),
@@ -1202,18 +1210,18 @@ def fit_bayesian_phase_coordinates(
             "time_stop": t_stop_k,
             "time_quarter": t_quarter_k,
             "duration": duration_k,
-            "center_x": float(layer1.center_mean[k, 0]),
-            "center_y": float(layer1.center_mean[k, 1]),
-            "center_z": float(layer1.center_mean[k, 2]),
-            "e1_x": float(layer1.e1_mean[k, 0]),
-            "e1_y": float(layer1.e1_mean[k, 1]),
-            "e1_z": float(layer1.e1_mean[k, 2]),
-            "e2_x": float(layer1.e2_mean[k, 0]),
-            "e2_y": float(layer1.e2_mean[k, 1]),
-            "e2_z": float(layer1.e2_mean[k, 2]),
-            "normal_x": float(layer1.normal_mean[k, 0]),
-            "normal_y": float(layer1.normal_mean[k, 1]),
-            "normal_z": float(layer1.normal_mean[k, 2]),
+            "center_x": float(layer2.cycle_center_mean[k, 0]),
+            "center_y": float(layer2.cycle_center_mean[k, 1]),
+            "center_z": float(layer2.cycle_center_mean[k, 2]),
+            "e1_x": float(layer2.cycle_e1_mean[k, 0]),
+            "e1_y": float(layer2.cycle_e1_mean[k, 1]),
+            "e1_z": float(layer2.cycle_e1_mean[k, 2]),
+            "e2_x": float(layer2.cycle_e2_mean[k, 0]),
+            "e2_y": float(layer2.cycle_e2_mean[k, 1]),
+            "e2_z": float(layer2.cycle_e2_mean[k, 2]),
+            "normal_x": float(layer2.cycle_normal_mean[k, 0]),
+            "normal_y": float(layer2.cycle_normal_mean[k, 1]),
+            "normal_z": float(layer2.cycle_normal_mean[k, 2]),
             "radius_mean": R_k_mean_k,
             "radius_sd": R_k_sd_k,
             "perp_mean": perp_mean_k,

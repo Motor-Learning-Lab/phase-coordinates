@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "phase-coordinates"
 version = "0.1.0"
-description = "Cycle-by-cycle PCA phase coordinates for multivariate cyclic motion"
+description = "Experimental PCA and Bayesian phase-coordinate tools for cyclic motion"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
