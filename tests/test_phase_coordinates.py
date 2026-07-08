@@ -672,14 +672,18 @@ class TestFitPcaPhaseCoordinates:
     def test_min_samples_per_cycle_skips_short_cycles(self):
         """
         If min_samples_per_cycle is very large, all cycles should be skipped
-        and models should be empty.
+        (no fitted model), but every epoch cycle still gets a fit_ok=False
+        row with NaN geometry rather than being dropped from the table.
         """
         X, phase_true, _ = _make_cyclic_3d(n_cycles=3, samples_per_cycle=50)
+        epochs = _epochs(phase_true, 100.0)
         samples, cycles, details = fit_pca_phase_coordinates(
-            X, epochs=_epochs(phase_true, 100.0), min_samples_per_cycle=1000
+            X, epochs=epochs, min_samples_per_cycle=1000
         )
         assert len(details["models"]) == 0
-        assert len(cycles) == 0
+        assert len(cycles) == epochs.n_cycles
+        assert not cycles["fit_ok"].any()
+        assert cycles["center_x"].isna().all()
 
 
 # ---------------------------------------------------------------------------

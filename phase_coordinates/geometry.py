@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 
 
-def interp_X_at_times(X, fs, times):
+def interp_X_at_times(X, fs, times, *, bounds_error: bool = True):
     """
     Linearly interpolate rows of ``X`` at real-valued times.
 
@@ -20,8 +20,16 @@ def interp_X_at_times(X, fs, times):
     fs : float
         Sampling rate in Hz.
     times : array-like, shape (m,)
-        Query times in seconds.  Values outside ``[0, (n_time-1)/fs]`` are
-        clamped to the edge values by :func:`numpy.interp`.
+        Query times in seconds.
+    bounds_error : bool
+        If ``True`` (the default), raise ``ValueError`` when any query time
+        falls outside ``[0, (n_time-1)/fs]`` rather than silently clamping
+        to the edge value.  A candidate anchor time that lands outside the
+        signal window is usually a sign of a bad candidate (e.g. a bad
+        period/offset guess), and clamping would give it a plausible-looking
+        but wrong value.  Pass ``bounds_error=False`` for callers that
+        genuinely intend extrapolation-by-clamping (e.g. posterior-mean
+        boundary times that may drift slightly past the data edge).
 
     Returns
     -------
@@ -32,6 +40,20 @@ def interp_X_at_times(X, fs, times):
     times = np.asarray(times, dtype=float)
     n_time = X.shape[0]
     t_grid = np.arange(n_time) / float(fs)
+
+    if bounds_error and times.size:
+        t_lo, t_hi = t_grid[0], t_grid[-1]
+        eps = 1e-9 * max(1.0, t_hi - t_lo)
+        out_of_bounds = (times < t_lo - eps) | (times > t_hi + eps)
+        if np.any(out_of_bounds):
+            bad = times[out_of_bounds]
+            raise ValueError(
+                f"interp_X_at_times: {len(bad)} query time(s) fall outside "
+                f"the signal window [{t_lo:.6g}, {t_hi:.6g}] seconds "
+                f"(e.g. {bad[0]:.6g}). Pass bounds_error=False to clamp to "
+                "the edge value instead."
+            )
+
     return np.column_stack([np.interp(times, t_grid, X[:, d]) for d in range(X.shape[1])])
 
 

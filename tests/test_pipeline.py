@@ -289,7 +289,12 @@ def test_find_epochs_by_geometric_score_locks_onto_1s_period():
     assert list(table.columns) == [
         "period", "offset", "n_cycles", "total_score",
         "planarity", "quarter_anchor_orth_ratio", "anchor_norm",
+        "fraction_samples_assigned", "min_samples_per_cycle",
+        "coverage_duration_fraction",
     ]
+    assert (table["fraction_samples_assigned"] >= 0).all()
+    assert (table["fraction_samples_assigned"] <= 1).all()
+    assert (table["coverage_duration_fraction"] >= 0).all()
     assert len(table) > 0
     assert best_epochs.source == "geometric_score"
 
@@ -313,6 +318,7 @@ def test_compute_cycle_quality_shape_and_finite():
         "quarter_anchor_orth_norm", "quarter_anchor_orth_ratio",
         "oriented_normal_x", "oriented_normal_y", "oriented_normal_z",
         "orientation_score",
+        "signed_orientation_score",
         "edge_valid",
     }
     assert set(q.columns) == expected
@@ -322,4 +328,7 @@ def test_compute_cycle_quality_shape_and_finite():
         assert np.all(np.isfinite(q[col])), f"{col} has non-finite values"
     assert (q["planarity_ratio"] > 0.9).all()
     assert (q["orientation_score"] > 0.9).all()  # all cycles share the same plane
+    # All cycles traverse the same direction, so the unaligned signed score
+    # should agree with the sign-aligned one here.
+    assert (q["signed_orientation_score"] > 0.9).all()
     assert q["edge_valid"].all()

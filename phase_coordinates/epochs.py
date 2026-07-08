@@ -43,7 +43,11 @@ class CycleEpochs:
         time window (before ``tau[0]`` or after ``tau[-1]``) are marked with
         ``-1``.
     phase : ndarray or None, shape (n_time,)
-        Unwrapped phase in radians when known, otherwise ``None``.
+        Unwrapped phase in radians, zero-referenced so that ``phase[0] == 0``,
+        when known, otherwise ``None``.  ``phase_in_cycle`` is
+        ``mod(phase, 2*pi)`` — the two fields share the same reference so
+        that ``phase // (2*pi) == cycle_index`` holds wherever
+        ``cycle_index >= 0``.
     phase_in_cycle : ndarray or None, shape (n_time,)
         Phase within the current cycle, in ``[0, 2*pi)``, when known,
         otherwise ``None``.
@@ -64,6 +68,56 @@ class CycleEpochs:
     time: np.ndarray
     source: str
     metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate the invariants documented above.
+
+        ``tau`` may have length 1 (zero cycles) — this represents a
+        candidate window in which no complete cycle fits, which
+        :func:`candidate_epochs_from_period_offset` legitimately produces
+        during a period/offset search.
+        """
+        tau = np.asarray(self.tau)
+        if tau.ndim != 1:
+            raise ValueError(f"tau must be 1-D, got shape {tau.shape}.")
+        if len(tau) < 1:
+            raise ValueError("tau must have at least 1 element.")
+        if len(tau) >= 2 and np.any(np.diff(tau) <= 0):
+            raise ValueError("tau must be strictly increasing.")
+
+        duration = np.asarray(self.duration)
+        expected_duration = np.diff(tau)
+        if duration.shape != expected_duration.shape:
+            raise ValueError(
+                f"duration has shape {duration.shape}, expected "
+                f"{expected_duration.shape} (= diff(tau))."
+            )
+        if not np.allclose(duration, expected_duration, rtol=1e-8, atol=1e-10):
+            raise ValueError("duration must equal diff(tau).")
+
+        cycle_index = np.asarray(self.cycle_index)
+        time = np.asarray(self.time)
+        if cycle_index.shape != time.shape:
+            raise ValueError(
+                f"cycle_index has shape {cycle_index.shape} but time has "
+                f"shape {time.shape}; they must match."
+            )
+
+        if self.phase is not None:
+            phase = np.asarray(self.phase)
+            if phase.shape != time.shape:
+                raise ValueError(
+                    f"phase has shape {phase.shape} but time has shape "
+                    f"{time.shape}; they must match."
+                )
+
+        if self.phase_in_cycle is not None:
+            phase_in_cycle = np.asarray(self.phase_in_cycle)
+            if phase_in_cycle.shape != time.shape:
+                raise ValueError(
+                    f"phase_in_cycle has shape {phase_in_cycle.shape} but "
+                    f"time has shape {time.shape}; they must match."
+                )
 
     @property
     def n_cycles(self) -> int:
@@ -147,8 +201,9 @@ def identify_cycles_from_phase(
     Returns
     -------
     CycleEpochs
-        Epochs with ``source="phase"``, ``phase = phase``, and
-        ``phase_in_cycle`` filled in.
+        Epochs with ``source="phase"``, ``phase = phase - phase[0]``
+        (zero-referenced, so ``phase[0] == 0``), and ``phase_in_cycle``
+        filled in.
 
     Notes
     -----
@@ -156,6 +211,15 @@ def identify_cycles_from_phase(
     ``k * 2*pi``, computed by linear interpolation between adjacent samples.
     This function does *not* call :func:`hilbert_phase` — callers who need
     that must run it first.
+
+    Raises
+    ------
+    ValueError
+        If ``phase`` is not non-decreasing.  ``identify_cycles_from_phase``
+        locates cycle boundaries with ``searchsorted``, which silently
+        produces wrong results on a non-monotone signal; a reversal usually
+        means the reference signal or frequency band used to compute
+        ``phase`` does not define a reliable instantaneous phase.
     """
     phase = np.asarray(phase, dtype=float)
     if phase.ndim != 1:
@@ -179,6 +243,20 @@ def identify_cycles_from_phase(
     time = np.arange(n_time) / fs
 
     phase0 = phase - phase[0]
+
+    reversals = np.diff(phase0) < 0
+    if np.any(reversals):
+        first_idx = int(np.argmax(reversals)) + 1
+        raise ValueError(
+            f"phase is not monotonically non-decreasing: {int(reversals.sum())} "
+            f"reversal(s) found, first at sample index {first_idx} "
+            f"(phase drop of {phase0[first_idx - 1] - phase0[first_idx]:.4g} rad). "
+            "identify_cycles_from_phase requires a monotone unwrapped phase; "
+            "this usually means the reference signal or frequency band used "
+            "to compute the phase does not define a reliable instantaneous "
+            "phase (e.g. low SNR)."
+        )
+
     cycle_index = np.floor(phase0 / (2 * np.pi)).astype(int)
     phase_in_cycle = np.mod(phase0, 2 * np.pi)
 
@@ -215,7 +293,7 @@ def identify_cycles_from_phase(
         tau=tau,
         duration=duration,
         cycle_index=ci,
-        phase=phase,
+        phase=phase0,
         phase_in_cycle=phase_in_cycle,
         time=time,
         source="phase",

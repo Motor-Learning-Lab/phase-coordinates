@@ -262,10 +262,11 @@ def fit_pca_phase_coordinates(
     previous_components = None
 
     # ---- local PCA per cycle ----
-    unique_cycles = [c for c in np.unique(cycle_id) if c >= 0 and c < K]
+    n_samples_in_cycle = {}
 
-    for cyc in unique_cycles:
+    for cyc in range(K):
         idx = np.where(cycle_id == cyc)[0]
+        n_samples_in_cycle[cyc] = int(len(idx))
 
         if len(idx) < min_samples_per_cycle:
             continue
@@ -340,12 +341,12 @@ def fit_pca_phase_coordinates(
     )
 
     # ---- build cycles DataFrame ----
-    fitted_cycles = sorted(models.keys())
+    # One row per epoch cycle (0..K-1): cycles skipped by the
+    # min_samples_per_cycle filter still appear, with fit_ok=False and NaN
+    # geometry, so len(cycles) == epochs.n_cycles always holds and callers
+    # can distinguish "fitted" from "never fitted".
     cycle_rows = []
-    for cyc_k in fitted_cycles:
-        m = models[cyc_k]
-        idx_k = m["indices"]
-
+    for cyc_k in range(K):
         t_start = float(epochs.tau[cyc_k])
         t_stop = float(epochs.tau[cyc_k + 1])
         duration = t_stop - t_start
@@ -353,6 +354,38 @@ def fit_pca_phase_coordinates(
         s_start = int(epochs.sample_start[cyc_k])
         s_stop = int(epochs.sample_stop[cyc_k])
 
+        m = models.get(cyc_k)
+        if m is None:
+            cycle_rows.append({
+                "cycle": cyc_k,
+                "sample_start": s_start,
+                "sample_stop": s_stop,
+                "time_start": t_start,
+                "time_stop": t_stop,
+                "time_quarter": t_quarter,
+                "duration": duration,
+                "center_x": float("nan"),
+                "center_y": float("nan"),
+                "center_z": float("nan"),
+                "e1_x": float("nan"),
+                "e1_y": float("nan"),
+                "e1_z": float("nan"),
+                "e2_x": float("nan"),
+                "e2_y": float("nan"),
+                "e2_z": float("nan"),
+                "normal_x": float("nan"),
+                "normal_y": float("nan"),
+                "normal_z": float("nan"),
+                "radius_mean": float("nan"),
+                "radius_sd": float("nan"),
+                "perp_mean": float("nan"),
+                "perp_sd": float("nan"),
+                "n_samples": n_samples_in_cycle.get(cyc_k, 0),
+                "fit_ok": False,
+            })
+            continue
+
+        idx_k = m["indices"]
         center = m["center"]
         comps = m["components"]
 

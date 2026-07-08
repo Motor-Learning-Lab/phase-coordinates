@@ -244,50 +244,6 @@ def _linear_interp_matrix(t_grid, eval_t):
 # ---------------------------------------------------------------------------
 
 @dataclass
-class BayesianPhaseEstimates:
-    """Posterior mean point estimates (spec: "Estimates")."""
-
-    # Cycle-level (Layer 1)
-    tau: np.ndarray                  # (K,) boundary times, seconds
-    period: np.ndarray               # (K-1,) cycle durations T_k, seconds
-    cycle_center: np.ndarray         # (K-1, 3)
-    cycle_normal: np.ndarray         # (K-1, 3)
-    boundary_direction: np.ndarray   # (K-1, 3) a_k
-
-    # Instantaneous (Layer 2), one row per time sample in the fitted window
-    time: np.ndarray                 # (n_time,) seconds
-    phase: np.ndarray                # (n_time,)
-    phase_velocity: np.ndarray       # (n_time,)
-    center: np.ndarray               # (n_time, 3)
-    normal: np.ndarray               # (n_time, 3)
-    e1: np.ndarray                   # (n_time, 3)
-    e2: np.ndarray                   # (n_time, 3)
-    radius: np.ndarray               # (n_time,)
-    perp_deviation: np.ndarray       # (n_time,)
-    predicted_trajectory: np.ndarray  # (n_time, 3)
-
-
-@dataclass
-class BayesianPhaseUncertainty:
-    """Posterior SDs / credible half-widths for key quantities (spec: "Uncertainty")."""
-
-    tau_sd: np.ndarray                 # (K,)
-    period_sd: np.ndarray              # (K-1,)
-    cycle_center_sd: np.ndarray        # (K-1, 3)
-    cycle_normal_angular_sd: np.ndarray  # (K-1,) radians
-    boundary_direction_sd: np.ndarray  # (K-1, 3)
-
-    phase_sd: np.ndarray               # (n_time,)
-    phase_velocity_sd: np.ndarray      # (n_time,)
-    center_sd: np.ndarray              # (n_time, 3)
-    normal_angular_sd: np.ndarray      # (n_time,) radians
-    radius_sd: np.ndarray              # (n_time,)
-    perp_deviation_sd: np.ndarray      # (n_time,)
-
-    observation_noise_sd: float        # sigma_x posterior mean
-
-
-@dataclass
 class BayesianPhaseDiagnostics:
     """
     Diagnostics from the spec's "Diagnostics" section. ``failures`` are hard
@@ -313,16 +269,6 @@ class BayesianPhaseDiagnostics:
     def ok(self) -> bool:
         """``True`` if there are no hard failures."""
         return len(self.failures) == 0
-
-
-@dataclass
-class BayesianPhaseResult:
-    """Top-level result of :func:`fit_bayesian_phase_coordinates`."""
-
-    estimates: BayesianPhaseEstimates
-    uncertainty: BayesianPhaseUncertainty
-    diagnostics: BayesianPhaseDiagnostics
-    bayesian_report: Optional[Any] = None
 
 
 def _pt_interp_at(t_grid_const, X_grid_const, tau, n_grid, pt):
@@ -522,9 +468,12 @@ def _fit_layer1(
     # Compute oriented frame deterministically from posterior-mean tau and c.
     # The frame is derived from real-valued interpolation at tau_mean, not
     # sampled, so there is no sign ambiguity.
+    # bounds_error=False: tau_mean is a posterior mean with a boundary-timing
+    # prior sigma of _BOUNDARY_TIMING_SD_FRAC * T0, so it can legitimately
+    # drift a little past the data edge near the first/last boundary.
     T_k = tau_mean[1:] - tau_mean[:-1]
-    x0 = interp_X_at_times(X, fs, tau_mean[:-1])
-    x90 = interp_X_at_times(X, fs, tau_mean[:-1] + 0.25 * T_k)
+    x0 = interp_X_at_times(X, fs, tau_mean[:-1], bounds_error=False)
+    x90 = interp_X_at_times(X, fs, tau_mean[:-1] + 0.25 * T_k, bounds_error=False)
     a0_mean, a90_mean, e1_mean, e2_mean, n_mean, _ = \
         _oriented_frame_from_anchors_with_diag(x0, x90, c_mean)
 
@@ -646,9 +595,10 @@ def _fit_layer2(
     c1_mean = layer1.center_mean   # (K_cyc, 3)
 
     # --- Fixed anchor points from interpolation at tau_mean ---
+    # bounds_error=False: see the matching comment in _fit_layer1.
     T_k = tau_mean[1:] - tau_mean[:-1]               # (K_cyc,)
-    x0_arr = interp_X_at_times(X, fs, tau_mean[:-1])                   # (K_cyc, 3)
-    x90_arr = interp_X_at_times(X, fs, tau_mean[:-1] + 0.25 * T_k)    # (K_cyc, 3)
+    x0_arr = interp_X_at_times(X, fs, tau_mean[:-1], bounds_error=False)                   # (K_cyc, 3)
+    x90_arr = interp_X_at_times(X, fs, tau_mean[:-1] + 0.25 * T_k, bounds_error=False)    # (K_cyc, 3)
     x0_const = pt.constant(x0_arr)
     x90_const = pt.constant(x90_arr)
 
@@ -1020,6 +970,7 @@ def fit_bayesian_phase_coordinates(
     *,
     sampling_rate_hz,
     seed_epochs: Optional[CycleEpochs] = None,
+    T0: Optional[float] = None,
     columns=None,
     draws=1000,
     tune=1000,
@@ -1047,6 +998,16 @@ def fit_bayesian_phase_coordinates(
             seed_epochs = epochs_from_boundary_indices(tau_idx, ...)
 
         Pass this argument to inspect or override the seed path.
+    T0 : float, optional
+        Reference cycle period in seconds, used to scale the Layer 1
+        boundary-timing prior sigma (``_BOUNDARY_TIMING_SD_FRAC * T0``) and
+        the log-duration prior mean. If omitted (the default), it is
+        estimated internally from the periodogram of the dominant PCA
+        reference signal, as before. If you pass ``seed_epochs`` from a
+        source with a different implied period (e.g.
+        :func:`~phase_coordinates.scoring.find_epochs_by_geometric_score`),
+        pass its period here too so the Layer 1 prior matches the seed
+        instead of silently using the periodogram estimate.
     columns : list of str, optional
         Subset of columns to use when ``X`` is a :class:`pandas.DataFrame`.
     draws, tune, chains : int
@@ -1098,8 +1059,16 @@ def fit_bayesian_phase_coordinates(
     n_input_time = X_arr.shape[0]
 
     R_X, xbar = robust_movement_scale(X_arr)
-    ref = dominant_reference_signal(X_arr)
-    T0 = estimate_dominant_period(ref, fs)
+
+    ref = None
+    if T0 is None or seed_epochs is None:
+        ref = dominant_reference_signal(X_arr)
+    if T0 is None:
+        T0 = estimate_dominant_period(ref, fs)
+    else:
+        T0 = float(T0)
+        if T0 <= 0:
+            raise ValueError(f"T0 must be positive, got {T0}.")
 
     if seed_epochs is None:
         tau_idx = seed_boundary_indices(ref, fs, T0)
@@ -1289,108 +1258,3 @@ def fit_bayesian_phase_coordinates(
         details["report"] = {"layer1": layer1.idata, "layer2": layer2.idata}
 
     return samples, cycles, details
-
-
-def _fit_bayesian_phase_coordinates_legacy(
-    X,
-    sampling_rate_hz,
-    columns=None,
-    n_velocity_knots=None,
-    draws=1000,
-    tune=1000,
-    chains=4,
-    target_accept=0.9,
-    random_seed=None,
-    return_report=False,
-):
-    """Legacy wrapper returning BayesianPhaseResult (for internal use)."""
-    import pandas as pd
-
-    if isinstance(X, pd.DataFrame):
-        X_arr = X[columns].to_numpy(dtype=float) if columns else X.to_numpy(dtype=float)
-    else:
-        X_arr = np.asarray(X, dtype=float)
-
-    if X_arr.ndim != 2 or X_arr.shape[1] != 3:
-        raise ValueError(
-            f"fit_bayesian_phase_coordinates requires 3-D data, shape "
-            f"(n_time, 3); got shape {X_arr.shape}."
-        )
-    if not np.all(np.isfinite(X_arr)):
-        raise ValueError("X contains non-finite values (NaN or Inf).")
-
-    fs = float(sampling_rate_hz)
-    if fs <= 0:
-        raise ValueError(f"sampling_rate_hz must be positive, got {fs}.")
-
-    _import_pymc()
-    _import_pytensor_tensor()
-    _import_arviz()
-    use_numba = _numba_available()
-
-    R_X, xbar = robust_movement_scale(X_arr)
-    ref = dominant_reference_signal(X_arr)
-    T0 = estimate_dominant_period(ref, fs)
-    tau_idx = seed_boundary_indices(ref, fs, T0)
-    seed_epochs = epochs_from_boundary_indices(
-        tau_idx, sampling_rate_hz=fs, n_time=X_arr.shape[0],
-        source="periodogram_peaks", metadata={"T0": T0},
-    )
-
-    layer1 = _fit_layer1(
-        X_arr, fs, seed_epochs, T0, R_X, xbar,
-        draws=draws, tune=tune, chains=chains, target_accept=target_accept,
-        random_seed=random_seed, use_numba=use_numba,
-    )
-    layer2 = _fit_layer2(
-        X_arr, fs, layer1, T0, R_X, n_velocity_knots=n_velocity_knots,
-        draws=draws, tune=tune, chains=chains, target_accept=target_accept,
-        random_seed=random_seed, use_numba=use_numba,
-    )
-
-    K = len(layer1.tau_mean)
-    estimates = BayesianPhaseEstimates(
-        tau=layer1.tau_mean,
-        period=layer1.period_mean,
-        cycle_center=layer1.center_mean,
-        cycle_normal=layer1.normal_mean,
-        boundary_direction=layer1.a0_mean,
-        time=layer2.time,
-        phase=layer2.phase_mean,
-        phase_velocity=layer2.phase_velocity_mean,
-        center=layer2.center_mean,
-        normal=layer2.normal_mean,
-        e1=layer2.e1_mean,
-        e2=layer2.e2_mean,
-        radius=layer2.radius_mean,
-        perp_deviation=layer2.perp_deviation_mean,
-        predicted_trajectory=layer2.predicted_trajectory_mean,
-    )
-
-    uncertainty = BayesianPhaseUncertainty(
-        tau_sd=layer1.tau_sd,
-        period_sd=layer1.period_sd,
-        cycle_center_sd=layer1.center_sd,
-        cycle_normal_angular_sd=np.zeros(K - 1),
-        boundary_direction_sd=np.zeros_like(layer1.a0_mean),
-        phase_sd=layer2.phase_sd,
-        phase_velocity_sd=layer2.phase_velocity_sd,
-        center_sd=layer2.center_sd,
-        normal_angular_sd=layer2.normal_angular_sd,
-        radius_sd=layer2.radius_sd,
-        perp_deviation_sd=layer2.perp_deviation_sd,
-        observation_noise_sd=layer2.sigma_x_mean,
-    )
-
-    diagnostics = _compute_diagnostics(layer1, layer2, R_X)
-
-    bayesian_report = None
-    if return_report:
-        bayesian_report = {"layer1": layer1.idata, "layer2": layer2.idata}
-
-    return BayesianPhaseResult(
-        estimates=estimates,
-        uncertainty=uncertainty,
-        diagnostics=diagnostics,
-        bayesian_report=bayesian_report,
-    )

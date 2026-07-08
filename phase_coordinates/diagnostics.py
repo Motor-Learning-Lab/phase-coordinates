@@ -28,6 +28,7 @@ _DIAG_COLUMNS = [
     "quarter_anchor_orth_norm", "quarter_anchor_orth_ratio",
     "oriented_normal_x", "oriented_normal_y", "oriented_normal_z",
     "orientation_score",
+    "signed_orientation_score",
     "edge_valid",
 ]
 
@@ -71,11 +72,20 @@ def compute_cycle_quality(
     - ``planarity_ratio = 1 - PC3_var / total_var``.
     - ``anchor_norm``/``quarter_anchor_orth_*`` use trajectory positions at
       cycle start and quarter-cycle time, linearly interpolated.
-    - ``orientation_score`` = dot(``n_k``, ``global_n_mean``) where
-      ``global_n_mean`` is the sign-aligned mean of per-cycle normals.  A
-      value near ``+1`` means the cycle's plane normal agrees with the
-      population direction; values near ``-1`` mean it is flipped but
-      otherwise consistent; near ``0`` means it is orthogonal.
+    - ``orientation_score`` = dot(``n_aligned_k``, ``global_n_mean``), where
+      ``n_aligned_k`` is the per-cycle normal *after* flipping it into the
+      same hemisphere as the reference normal, and ``global_n_mean`` is the
+      mean of the aligned normals.  Because every ``n_aligned_k`` is already
+      sign-corrected, this value is always near ``+1`` (near ``0`` only
+      means the cycle's plane is nearly orthogonal to the population
+      direction) — it *cannot* go near ``-1``, so it cannot detect a cycle
+      whose traversal direction is genuinely reversed.
+    - ``signed_orientation_score`` = dot(``n_k``, ``global_n_mean``) using
+      the *unaligned* per-cycle normal ``n_k``. A cycle traversed in the
+      opposite direction from the rest of the population shows up here as a
+      value near ``-1`` (rather than being masked by sign-alignment as in
+      ``orientation_score``); use this column to detect traversal-direction
+      reversals.
     - ``edge_valid`` is ``True`` iff the cycle boundaries lie inside the
       observed time window.
     """
@@ -167,6 +177,7 @@ def compute_cycle_quality(
             planarity_k = float(1.0 - pcs[2])
 
         orient_k = float(np.dot(n_aligned[k], global_n_mean))
+        signed_orient_k = float(np.dot(n_arr[k], global_n_mean))
         edge_valid_k = bool((tau[k] >= 0.0) and (tau[k + 1] <= t_end + 1e-12))
 
         rows.append({
@@ -188,6 +199,7 @@ def compute_cycle_quality(
             "oriented_normal_y": float(n_arr[k, 1]),
             "oriented_normal_z": float(n_arr[k, 2]),
             "orientation_score": orient_k,
+            "signed_orientation_score": signed_orient_k,
             "edge_valid": edge_valid_k,
         })
 

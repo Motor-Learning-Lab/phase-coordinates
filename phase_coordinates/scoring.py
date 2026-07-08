@@ -174,13 +174,21 @@ def score_epoch_geometry(
     dict
         With keys ``total_score``, ``planarity``, ``anchor_norm``,
         ``quarter_anchor_orth_norm``, ``quarter_anchor_orth_ratio``,
-        ``min_samples_per_cycle``, ``n_cycles`` and ``per_cycle`` (list of
-        dicts, one per cycle).
+        ``min_samples_per_cycle``, ``n_cycles``, ``fraction_samples_assigned``
+        (fraction of input samples with ``cycle_index >= 0``),
+        ``coverage_duration_fraction`` (``(tau[-1] - tau[0]) /
+        ((n_time - 1) / fs)``), and ``per_cycle`` (list of dicts, one per
+        cycle).  The coverage metrics are report-only: they are not folded
+        into ``total_score``, so two candidates with identical planarity and
+        anchor geometry but very different coverage (e.g. 30% vs 90% of the
+        recording assigned to cycles) score identically on ``total_score``
+        alone — inspect the coverage columns separately.
     """
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
     if fs <= 0:
         raise ValueError(f"sampling_rate_hz must be positive, got {fs}.")
+    n_time = X_arr.shape[0]
 
     w = dict(DEFAULT_SCORE_WEIGHTS)
     if weights:
@@ -200,6 +208,8 @@ def score_epoch_geometry(
             "quarter_anchor_orth_ratio": float("nan"),
             "min_samples_per_cycle": 0,
             "n_cycles": 0,
+            "fraction_samples_assigned": 0.0,
+            "coverage_duration_fraction": 0.0,
             "per_cycle": [],
         }
 
@@ -295,6 +305,12 @@ def score_epoch_geometry(
     else:
         total = float("-inf")
 
+    fraction_samples_assigned = float(np.sum(epochs.cycle_index >= 0)) / n_time
+    total_duration = (n_time - 1) / fs
+    coverage_duration_fraction = (
+        float((tau[-1] - tau[0]) / total_duration) if total_duration > 0 else 0.0
+    )
+
     return {
         "total_score": float(total),
         "planarity": planarity_mean,
@@ -303,6 +319,8 @@ def score_epoch_geometry(
         "quarter_anchor_orth_ratio": q_orth_ratio_mean,
         "min_samples_per_cycle": int(min(n_samples_per)) if n_samples_per else 0,
         "n_cycles": K,
+        "fraction_samples_assigned": fraction_samples_assigned,
+        "coverage_duration_fraction": coverage_duration_fraction,
         "per_cycle": per_cycle,
     }
 
@@ -343,7 +361,9 @@ def find_epochs_by_geometric_score(
     candidate_table : pandas.DataFrame
         One row per scored (period, offset) pair.  Columns: ``period,
         offset, n_cycles, total_score, planarity,
-        quarter_anchor_orth_ratio, anchor_norm``.
+        quarter_anchor_orth_ratio, anchor_norm, fraction_samples_assigned,
+        min_samples_per_cycle, coverage_duration_fraction``.  The coverage
+        columns are report-only and are not folded into ``total_score``.
     """
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
@@ -383,6 +403,9 @@ def find_epochs_by_geometric_score(
                 "planarity": score["planarity"],
                 "quarter_anchor_orth_ratio": score["quarter_anchor_orth_ratio"],
                 "anchor_norm": score["anchor_norm"],
+                "fraction_samples_assigned": score["fraction_samples_assigned"],
+                "min_samples_per_cycle": score["min_samples_per_cycle"],
+                "coverage_duration_fraction": score["coverage_duration_fraction"],
             })
             if score["total_score"] > best_score:
                 best_score = score["total_score"]
@@ -399,6 +422,8 @@ def find_epochs_by_geometric_score(
         columns=[
             "period", "offset", "n_cycles", "total_score",
             "planarity", "quarter_anchor_orth_ratio", "anchor_norm",
+            "fraction_samples_assigned", "min_samples_per_cycle",
+            "coverage_duration_fraction",
         ],
     )
 
