@@ -26,6 +26,12 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import find_peaks, periodogram
 
+from .epochs import CycleEpochs, epochs_from_boundary_indices
+from .geometry import (
+    interp_X_at_times,
+    oriented_frame_from_anchors,
+)
+
 _BAYES_INSTALL_HINT = (
     "fit_bayesian_phase_coordinates() requires the optional 'pymc' and "
     "'arviz' dependencies, which are not installed.\n\n"
@@ -158,46 +164,21 @@ def normalize(v, axis=-1, eps=1e-12):
     return v / np.clip(norm, eps, None)
 
 
-def interp_X_at_times(X, fs, query_t):
+def _oriented_frame_from_anchors_with_diag(x0, x90, c, eps=1e-12):
     """
-    Linearly interpolate trajectory X (n_time, 3) at real-valued query times.
-    Uses absolute time t = sample_index / fs. Safe for query_t outside the
-    data range (extrapolates as edge values via np.interp's default behaviour).
+    Layer-1/2 wrapper around :func:`phase_coordinates.geometry.oriented_frame_from_anchors`
+    that additionally returns the anchor vectors ``a0``/``a90`` and the norm
+    of the a90-orthogonal component (used for pre-sampling diagnostics).
     """
-    t_grid = np.arange(len(X)) / fs
-    return np.column_stack([
-        np.interp(query_t, t_grid, X[:, d])
-        for d in range(X.shape[1])
-    ])
-
-
-def _oriented_frame_from_anchors(x0, x90, c, eps=1e-12):
-    """
-    Compute a consistently oriented in-plane frame for each cycle from two
-    phase anchors and the cycle center.
-
-    Parameters
-    ----------
-    x0  : (K_cyc, 3) — interpolated data at the phase-zero time tau_k
-    x90 : (K_cyc, 3) — interpolated data at the quarter-cycle time tau_k + 0.25*T_k
-    c   : (K_cyc, 3) — cycle centers
-
-    Returns
-    -------
-    a0, a90    : anchor vectors relative to c  (K_cyc, 3)
-    e1, e2     : orthonormal in-plane basis    (K_cyc, 3)
-    n          : unit normal = cross(e1, e2)   (K_cyc, 3)
-    a90_orth_norm : ||a90 - e1*dot(a90,e1)||  (K_cyc,)  — near-zero flags degenerate quarter
-    """
+    x0 = np.asarray(x0, dtype=float)
+    x90 = np.asarray(x90, dtype=float)
+    c = np.asarray(c, dtype=float)
     a0 = x0 - c
     a90 = x90 - c
-    e1 = a0 / np.maximum(np.linalg.norm(a0, axis=1, keepdims=True), eps)
+    e1, e2, n = oriented_frame_from_anchors(x0, x90, c, eps=eps)
     dot_a90_e1 = np.sum(a90 * e1, axis=1, keepdims=True)
     a90_orth = a90 - e1 * dot_a90_e1
     a90_orth_norm = np.linalg.norm(a90_orth, axis=1)
-    e2 = a90_orth / np.maximum(a90_orth_norm[:, None], eps)
-    n = np.cross(e1, e2)
-    n = n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), eps)
     return a0, a90, e1, e2, n, a90_orth_norm
 
 
@@ -439,7 +420,7 @@ def _sample_kwargs(draws, tune, chains, target_accept, random_seed, use_numba, i
 def _fit_layer1(
     X,
     fs,
-    tau_idx,
+    seed_epochs,
     T0,
     R_X,
     xbar,
@@ -450,15 +431,34 @@ def _fit_layer1(
     random_seed,
     use_numba,
 ):
+    """
+    Fit the Layer 1 boundary/center model, seeded by ``seed_epochs``.
+
+    ``seed_epochs.tau`` supplies the initial mean of the boundary-time prior;
+    per-cycle seed centers are the sample-mean of ``X`` between successive
+    seed boundaries (recomputed here so the seeds match ``seed_epochs.tau``
+    even if the epochs come from a non-index source).
+    """
     pm = _import_pymc()
     pt = _import_pytensor_tensor()
 
     n_time = X.shape[0]
     t_grid = np.arange(n_time) / fs
-    K = len(tau_idx)
 
-    tau_hat = tau_idx / fs
-    c_hat = seed_cycle_centers(X, tau_idx)
+    tau_hat = np.asarray(seed_epochs.tau, dtype=float)
+    K = len(tau_hat)
+    # Convert real-valued boundary times to integer sample indices for
+    # ``seed_cycle_centers`` (which slices X directly).  Values are clamped
+    # into [0, n_time-1] so that a boundary that lies at the exact end of the
+    # signal doesn't overflow.
+    tau_idx_seed = np.clip(np.round(tau_hat * fs).astype(int), 0, n_time - 1)
+    # Make sure they are strictly increasing so slices in seed_cycle_centers
+    # are non-empty.
+    for i in range(1, len(tau_idx_seed)):
+        if tau_idx_seed[i] <= tau_idx_seed[i - 1]:
+            tau_idx_seed[i] = tau_idx_seed[i - 1] + 1
+    tau_idx_seed = np.clip(tau_idx_seed, 0, n_time - 1)
+    c_hat = seed_cycle_centers(X, tau_idx_seed)
 
     t_grid_const = pt.constant(t_grid, name="t_grid")
     X_const = pt.constant(X, name="X_grid")
@@ -526,7 +526,7 @@ def _fit_layer1(
     x0 = interp_X_at_times(X, fs, tau_mean[:-1])
     x90 = interp_X_at_times(X, fs, tau_mean[:-1] + 0.25 * T_k)
     a0_mean, a90_mean, e1_mean, e2_mean, n_mean, _ = \
-        _oriented_frame_from_anchors(x0, x90, c_mean)
+        _oriented_frame_from_anchors_with_diag(x0, x90, c_mean)
 
     return _Layer1Summary(
         tau_mean=tau_mean,
@@ -654,7 +654,7 @@ def _fit_layer2(
 
     # --- Frame at Layer 1 center means (for R1_mean and diagnostics) ---
     _, _, e1_prior, e2_prior, n_prior, a90_orth_norms = \
-        _oriented_frame_from_anchors(x0_arr, x90_arr, c1_mean)
+        _oriented_frame_from_anchors_with_diag(x0_arr, x90_arr, c1_mean)
 
     # --- Pre-sampling frame diagnostics ---
     a90_mean_arr = x90_arr - c1_mean
@@ -1019,6 +1019,7 @@ def fit_bayesian_phase_coordinates(
     X,
     *,
     sampling_rate_hz,
+    seed_epochs: Optional[CycleEpochs] = None,
     columns=None,
     draws=1000,
     tune=1000,
@@ -1033,10 +1034,19 @@ def fit_bayesian_phase_coordinates(
     Parameters
     ----------
     X : array-like or pandas.DataFrame, shape (n_time, 3)
-        3-D movement trajectory. Exactly 3 features are required (the model
-        uses a genuine cross product for the in-plane frame).
+        3-D movement trajectory.
     sampling_rate_hz : float
         Sampling rate in Hz.
+    seed_epochs : CycleEpochs, optional
+        Seed cycle boundaries.  If omitted, seeds are built internally by
+        running the explicit pipeline::
+
+            ref = dominant_reference_signal(X)
+            T0 = estimate_dominant_period(ref, fs)
+            tau_idx = seed_boundary_indices(ref, fs, T0)
+            seed_epochs = epochs_from_boundary_indices(tau_idx, ...)
+
+        Pass this argument to inspect or override the seed path.
     columns : list of str, optional
         Subset of columns to use when ``X`` is a :class:`pandas.DataFrame`.
     draws, tune, chains : int
@@ -1090,10 +1100,23 @@ def fit_bayesian_phase_coordinates(
     R_X, xbar = robust_movement_scale(X_arr)
     ref = dominant_reference_signal(X_arr)
     T0 = estimate_dominant_period(ref, fs)
-    tau_idx = seed_boundary_indices(ref, fs, T0)
+
+    if seed_epochs is None:
+        tau_idx = seed_boundary_indices(ref, fs, T0)
+        seed_epochs = epochs_from_boundary_indices(
+            tau_idx,
+            sampling_rate_hz=fs,
+            n_time=n_input_time,
+            source="periodogram_peaks",
+            metadata={"T0": T0},
+        )
+    elif not isinstance(seed_epochs, CycleEpochs):
+        raise TypeError(
+            f"seed_epochs must be a CycleEpochs, got {type(seed_epochs).__name__}."
+        )
 
     layer1 = _fit_layer1(
-        X_arr, fs, tau_idx, T0, R_X, xbar,
+        X_arr, fs, seed_epochs, T0, R_X, xbar,
         draws=draws, tune=tune, chains=chains, target_accept=target_accept,
         random_seed=random_seed, use_numba=use_numba,
     )
@@ -1309,9 +1332,13 @@ def _fit_bayesian_phase_coordinates_legacy(
     ref = dominant_reference_signal(X_arr)
     T0 = estimate_dominant_period(ref, fs)
     tau_idx = seed_boundary_indices(ref, fs, T0)
+    seed_epochs = epochs_from_boundary_indices(
+        tau_idx, sampling_rate_hz=fs, n_time=X_arr.shape[0],
+        source="periodogram_peaks", metadata={"T0": T0},
+    )
 
     layer1 = _fit_layer1(
-        X_arr, fs, tau_idx, T0, R_X, xbar,
+        X_arr, fs, seed_epochs, T0, R_X, xbar,
         draws=draws, tune=tune, chains=chains, target_accept=target_accept,
         random_seed=random_seed, use_numba=use_numba,
     )

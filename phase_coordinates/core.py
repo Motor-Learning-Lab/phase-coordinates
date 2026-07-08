@@ -1,6 +1,15 @@
 """
-Core functions for cycle-by-cycle PCA phase coordinates.
+Core PCA coordinate estimation and phase estimation utilities.
+
+This module now has a single responsibility: given a
+:class:`~phase_coordinates.epochs.CycleEpochs` assignment, fit a per-cycle
+PCA and produce the shared ``samples`` / ``cycles`` DataFrames.  Phase
+estimation (:func:`hilbert_phase`) lives here too but has no
+coordinate-estimation responsibilities: callers build epochs from the phase
+themselves and pass the epochs in.
 """
+
+from __future__ import annotations
 
 import warnings
 
@@ -9,20 +18,13 @@ import pandas as pd
 from sklearn.decomposition import PCA
 from scipy.signal import butter, sosfiltfilt, hilbert
 
+from .epochs import CycleEpochs
+
 # Minimum signal length required by sosfiltfilt with a 4th-order Butterworth
 # filter (2 second-order sections → default padlen = 3 * 2 * 2 = 12).
 _HILBERT_MIN_SAMPLES = 13
 
-# A phase step more negative than this (radians) is counted as a "large
-# backward jump".  A value of -0.5 rad is large relative to normal per-sample
-# phase increments for typical movement frequencies but small relative to the
-# π jumps that occur at amplitude nulls in multi-frequency or noisy signals.
 _PHASE_JUMP_THRESHOLD = -0.5
-
-# If the fraction of backward jumps in the central region of the signal
-# exceeds this value, a UserWarning is issued.  0.3% is essentially zero for
-# a clean single-frequency signal but is reliably exceeded by two-frequency
-# beating signals (which produce π jumps at amplitude nulls, ~0.4%).
 _NON_MONOTONIC_THRESHOLD = 0.003
 
 # ---------------------------------------------------------------------------
@@ -79,40 +81,23 @@ def hilbert_phase(ref_signal, fs, f_range):
     Parameters
     ----------
     ref_signal : array-like, shape (n_time,)
-        Scalar 1-D time series (e.g. one joint angle or marker coordinate).
-        Must contain only finite values.
+        Scalar 1-D time series.  Must contain only finite values.
     fs : float
         Sampling rate in Hz. Must be positive.
     f_range : tuple of float
         Bandpass frequency range ``(low, high)`` in Hz.
-        Must satisfy ``0 < low < high < fs / 2``.
 
     Returns
     -------
     phase_unwrapped : numpy.ndarray
         Unwrapped instantaneous phase in radians.
     phase_wrapped : numpy.ndarray
-        Wrapped instantaneous phase in radians (range ``[-pi, pi]``).
+        Wrapped instantaneous phase in radians.
     amplitude : numpy.ndarray
-        Instantaneous amplitude (envelope) of the analytic signal.
-
-    Raises
-    ------
-    ValueError
-        If ``ref_signal`` is not 1-D, contains non-finite values, is too
-        short for the filter, ``fs`` is not positive, or ``f_range`` is
-        invalid.
-
-    Warns
-    -----
-    UserWarning
-        If the unwrapped phase has many large negative steps in the central
-        region of the signal, indicating that the reference signal or
-        frequency band may not define a reliable instantaneous phase.
+        Instantaneous amplitude of the analytic signal.
     """
     ref_signal = np.asarray(ref_signal, dtype=float)
 
-    # ---- input validation ----
     if ref_signal.ndim != 1:
         raise ValueError(
             f"ref_signal must be 1-D, got shape {ref_signal.shape}."
@@ -143,13 +128,7 @@ def hilbert_phase(ref_signal, fs, f_range):
             f"frequency (fs/2 = {fs / 2} Hz)."
         )
 
-    sos = butter(
-        N=4,
-        Wn=f_range,
-        btype="bandpass",
-        fs=fs,
-        output="sos",
-    )
+    sos = butter(N=4, Wn=f_range, btype="bandpass", fs=fs, output="sos")
 
     try:
         x_filt = sosfiltfilt(sos, ref_signal)
@@ -186,57 +165,53 @@ def hilbert_phase(ref_signal, fs, f_range):
 def fit_pca_phase_coordinates(
     X,
     *,
-    phase=None,
-    ref_signal=None,
-    sampling_rate_hz=None,
-    f_range=None,
+    epochs: CycleEpochs,
     columns=None,
-    min_samples_per_cycle=10,
+    min_samples_per_cycle: int = 10,
 ):
     """
-    Compute cycle-by-cycle PCA geometric coordinates.
+    Fit cycle-by-cycle PCA phase coordinates given a cycle assignment.
 
-    Each cycle gets its own PCA plane fitted to the movement data in that
-    cycle. Within each cycle, the first two principal components span the
-    "phase plane" and the third component captures deviation perpendicular
-    to that plane.
+    This function does *only* coordinate estimation.  Phase estimation and
+    cycle identification are separate pipeline stages that produce the
+    :class:`~phase_coordinates.epochs.CycleEpochs` argument.
 
     Parameters
     ----------
     X : array-like or pandas.DataFrame, shape (n_time, n_features)
-        Multivariate movement data, e.g. x/y/z marker positions.
-        Requires at least 3 features.
-    phase : array-like, optional
-        Precomputed *unwrapped* phase in radians. When supplied,
-        ``ref_signal``, ``sampling_rate_hz``, and ``f_range`` are not needed.
-    ref_signal : array-like, optional
-        Scalar signal used to estimate Hilbert phase (e.g. one joint angle
-        or one marker coordinate). Required when ``phase`` is not supplied.
-    sampling_rate_hz : float, optional
-        Sampling rate in Hz. Required when ``ref_signal`` is used.
-    f_range : tuple of float, optional
-        Bandpass range for Hilbert-phase estimation, e.g. ``(0.5, 3.0)``.
-        Required when ``ref_signal`` is used.
+        Multivariate movement data.  Requires at least 3 features.
+    epochs : CycleEpochs
+        Cycle assignment.  Provides sample-to-cycle map, boundary times, and
+        (optionally) phase / phase_in_cycle for the ``samples`` output.
     columns : list of str, optional
-        Subset of columns to use when ``X`` is a :class:`pandas.DataFrame`.
-        If ``None``, all columns are used.
+        Subset of columns to use when ``X`` is a DataFrame.
     min_samples_per_cycle : int
-        Cycles with fewer than this many valid samples are skipped.
+        Cycles with fewer valid samples are skipped (``fit_ok = False``).
 
     Returns
     -------
     samples : pandas.DataFrame
-        One row per time point. Columns = SAMPLE_COLUMNS.
+        One row per input time sample.  Columns: :data:`SAMPLE_COLUMNS`.
     cycles : pandas.DataFrame
-        One row per fitted cycle. Columns = CYCLE_COLUMNS.
+        One row per fitted cycle.  Columns: :data:`CYCLE_COLUMNS`.
     details : dict
-        Algorithm-specific information including the per-cycle PCA models.
+        Includes ``algorithm="pca"`` and a ``models`` dict keyed by cycle
+        index, plus provenance from ``epochs``.
     """
+    if not isinstance(epochs, CycleEpochs):
+        raise TypeError(
+            "fit_pca_phase_coordinates requires epochs=CycleEpochs; "
+            f"got {type(epochs).__name__}."
+        )
+
     # ---- input handling ----
     if isinstance(X, pd.DataFrame):
         index = X.index
         columns_used = columns if columns else list(X.columns)
-        X_arr = X[columns_used].to_numpy(dtype=float) if columns else X.to_numpy(dtype=float)
+        if columns:
+            X_arr = X[columns].to_numpy(dtype=float)
+        else:
+            X_arr = X.to_numpy(dtype=float)
     else:
         index = None
         columns_used = columns
@@ -244,71 +219,59 @@ def fit_pca_phase_coordinates(
 
     if X_arr.ndim != 2:
         raise ValueError("X must have shape (n_time, n_features).")
-
     if X_arr.shape[1] < 3:
         raise ValueError("Need at least 3 features for local plane + perpendicular deviation.")
 
     n_time = X_arr.shape[0]
     n_features = X_arr.shape[1]
 
-    # ---- get phase ----
-    phase_source = "provided"
-    if phase is None:
-        if ref_signal is None or sampling_rate_hz is None or f_range is None:
-            raise ValueError(
-                "Provide either phase directly, or provide ref_signal, sampling_rate_hz, and f_range."
-            )
-
-        phase, phase_wrapped, amp_hilbert = hilbert_phase(
-            ref_signal=ref_signal,
-            fs=sampling_rate_hz,
-            f_range=f_range,
+    if len(epochs.cycle_index) != n_time:
+        raise ValueError(
+            f"epochs.cycle_index has length {len(epochs.cycle_index)} but X has "
+            f"{n_time} rows."
         )
-        phase_source = "hilbert"
+
+    cycle_id = np.asarray(epochs.cycle_index, dtype=int)
+    K = epochs.n_cycles
+
+    # ---- phase columns (optional; from epochs) ----
+    if epochs.phase is not None:
+        phase = np.asarray(epochs.phase, dtype=float)
+        if len(phase) != n_time:
+            raise ValueError("epochs.phase length does not match X.")
     else:
-        phase = np.asarray(phase, dtype=float)
-        if phase.ndim != 1:
-            raise ValueError(
-                f"phase must be 1-D, got shape {phase.shape}."
-            )
-        if not np.all(np.isfinite(phase)):
-            raise ValueError("phase contains non-finite values (NaN or Inf).")
-        phase_wrapped = np.angle(np.exp(1j * phase))
-        amp_hilbert = np.full(n_time, np.nan)
+        phase = np.full(n_time, np.nan)
 
-    if len(phase) != n_time:
-        raise ValueError("phase/ref_signal must have the same length as X.")
-
-    # ---- define cycles from unwrapped phase ----
-    phase0 = phase - phase[0]
-    cycle_id = np.floor(phase0 / (2 * np.pi)).astype(int)
-    phase_in_cycle = np.mod(phase0, 2 * np.pi)
+    if epochs.phase_in_cycle is not None:
+        phase_in_cycle = np.asarray(epochs.phase_in_cycle, dtype=float)
+        if len(phase_in_cycle) != n_time:
+            raise ValueError("epochs.phase_in_cycle length does not match X.")
+    else:
+        phase_in_cycle = np.full(n_time, np.nan)
 
     # ---- allocate outputs ----
     pc1 = np.full(n_time, np.nan)
     pc2 = np.full(n_time, np.nan)
     pc3 = np.full(n_time, np.nan)
-
-    theta_local_wrapped = np.full(n_time, np.nan)
     theta_local = np.full(n_time, np.nan)
+    theta_local_wrapped = np.full(n_time, np.nan)
     radius_local = np.full(n_time, np.nan)
     perp_local = np.full(n_time, np.nan)
 
     models = {}
-
     previous_components = None
 
     # ---- local PCA per cycle ----
-    for cyc in np.unique(cycle_id):
+    unique_cycles = [c for c in np.unique(cycle_id) if c >= 0 and c < K]
+
+    for cyc in unique_cycles:
         idx = np.where(cycle_id == cyc)[0]
 
         if len(idx) < min_samples_per_cycle:
             continue
 
         X_cyc = X_arr[idx]
-
         valid = np.all(np.isfinite(X_cyc), axis=1)
-
         if valid.sum() < min_samples_per_cycle:
             continue
 
@@ -321,17 +284,11 @@ def fit_pca_phase_coordinates(
         scores = pca.fit_transform(X_valid - center)
         components = pca.components_.copy()
 
-        # ---- align signs/orientation to previous cycle ----
-        # PCA axes can flip sign arbitrarily; keep the local frame consistent.
         if previous_components is not None:
             for k in range(3):
                 if np.dot(components[k], previous_components[k]) < 0:
                     components[k] *= -1
                     scores[:, k] *= -1
-
-            # Keep right-handed orientation approximately consistent.
-            # np.cross is only defined for 3-D vectors; skip this check
-            # for higher-dimensional feature spaces.
             if n_features == 3:
                 if np.dot(np.cross(components[0], components[1]), components[2]) < 0:
                     components[2] *= -1
@@ -349,9 +306,8 @@ def fit_pca_phase_coordinates(
         pc1[idx_valid] = u
         pc2[idx_valid] = v
         pc3[idx_valid] = z
-
-        theta_local_wrapped[idx_valid] = theta_w
         theta_local[idx_valid] = theta_u
+        theta_local_wrapped[idx_valid] = theta_w
         radius_local[idx_valid] = np.hypot(u, v)
         perp_local[idx_valid] = z
 
@@ -365,11 +321,7 @@ def fit_pca_phase_coordinates(
 
     # ---- build samples DataFrame ----
     sample_index = np.arange(n_time)
-    if sampling_rate_hz is not None:
-        time_arr = sample_index / float(sampling_rate_hz)
-    else:
-        time_arr = np.full(n_time, np.nan)
-
+    time_arr = np.asarray(epochs.time, dtype=float)
     samples = pd.DataFrame(
         {
             "sample_index": sample_index,
@@ -388,36 +340,31 @@ def fit_pca_phase_coordinates(
     )
 
     # ---- build cycles DataFrame ----
+    fitted_cycles = sorted(models.keys())
     cycle_rows = []
-    for cyc_k, m in models.items():
+    for cyc_k in fitted_cycles:
+        m = models[cyc_k]
         idx_k = m["indices"]
-        s_start = int(idx_k.min())
-        s_stop = int(idx_k.max()) + 1
 
-        if sampling_rate_hz is not None:
-            fs = float(sampling_rate_hz)
-            t_start = s_start / fs
-            t_stop = s_stop / fs
-            duration = t_stop - t_start
-            t_quarter = t_start + 0.25 * duration
-        else:
-            t_start = np.nan
-            t_stop = np.nan
-            duration = np.nan
-            t_quarter = np.nan
+        t_start = float(epochs.tau[cyc_k])
+        t_stop = float(epochs.tau[cyc_k + 1])
+        duration = t_stop - t_start
+        t_quarter = t_start + 0.25 * duration
+        s_start = int(epochs.sample_start[cyc_k])
+        s_stop = int(epochs.sample_stop[cyc_k])
 
         center = m["center"]
         comps = m["components"]
 
         def _get_vec3(arr, row):
-            if len(arr) > row and len(arr[row]) >= 3:
-                return arr[row][:3]
             v = np.zeros(3)
             if len(arr) > row:
-                v[:len(arr[row])] = arr[row]
+                d = min(3, len(arr[row]))
+                v[:d] = arr[row][:d]
             return v
 
-        cx, cy, cz = (center[:3] if len(center) >= 3 else np.pad(center, (0, 3 - len(center))))
+        cx, cy, cz = (center[:3] if len(center) >= 3
+                      else np.pad(center, (0, 3 - len(center))))
         e1 = _get_vec3(comps, 0)
         e2 = _get_vec3(comps, 1)
         normal = _get_vec3(comps, 2)
@@ -445,11 +392,11 @@ def fit_pca_phase_coordinates(
             "normal_x": float(normal[0]),
             "normal_y": float(normal[1]),
             "normal_z": float(normal[2]),
-            "radius_mean": float(np.nanmean(r_vals)),
-            "radius_sd": float(np.nanstd(r_vals)),
-            "perp_mean": float(np.nanmean(p_vals)),
-            "perp_sd": float(np.nanstd(p_vals)),
-            "n_samples": len(idx_k),
+            "radius_mean": float(np.nanmean(r_vals)) if r_vals.size else float("nan"),
+            "radius_sd": float(np.nanstd(r_vals)) if r_vals.size else float("nan"),
+            "perp_mean": float(np.nanmean(p_vals)) if p_vals.size else float("nan"),
+            "perp_sd": float(np.nanstd(p_vals)) if p_vals.size else float("nan"),
+            "n_samples": int(len(idx_k)),
             "fit_ok": True,
         })
 
@@ -458,13 +405,12 @@ def fit_pca_phase_coordinates(
     else:
         cycles = pd.DataFrame(columns=CYCLE_COLUMNS)
 
-    # ---- build details dict ----
     details = {
         "algorithm": "pca",
         "models": models,
-        "phase_source": phase_source,
+        "epochs_source": epochs.source,
+        "epochs_metadata": dict(epochs.metadata),
         "input_columns": columns_used,
-        "amp_hilbert": amp_hilbert,
         "warnings": [],
     }
 
