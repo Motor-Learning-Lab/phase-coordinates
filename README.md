@@ -20,16 +20,47 @@ pip install -e ".[bayes]"
 
 ## Quick start
 
-### PCA algorithm
+The pipeline is four explicit stages: phase estimation, cycle identification,
+coordinate estimation, and diagnostics.
+
+### Pattern 1: PCA with Hilbert phase
 
 ```python
-import numpy as np
-from phase_coordinates import fit_pca_phase_coordinates, reconstruct_phase_coordinates
+from phase_coordinates import (
+    hilbert_phase,
+    identify_cycles_from_phase,
+    fit_pca_phase_coordinates,
+    reconstruct_phase_coordinates,
+)
 
-# X: (n_time, 3+) array of movement data
-# phase: unwrapped phase in radians (or use ref_signal + sampling_rate_hz + f_range)
-samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
+phase, _, _ = hilbert_phase(ref_signal, fs, f_range)
+epochs = identify_cycles_from_phase(phase, sampling_rate_hz=fs)
+samples, cycles, details = fit_pca_phase_coordinates(X, epochs=epochs)
 X_hat = reconstruct_phase_coordinates(samples, cycles)
+```
+
+### Pattern 2: Geometric-score epoch finding (no phase estimator)
+
+```python
+from phase_coordinates import (
+    dominant_reference_signal,
+    period_candidates_from_periodogram,
+    find_epochs_by_geometric_score,
+    fit_pca_phase_coordinates,
+)
+
+ref = dominant_reference_signal(X)
+candidates = period_candidates_from_periodogram(ref, fs)
+epochs, table = find_epochs_by_geometric_score(X, fs, period_candidates=candidates)
+samples, cycles, details = fit_pca_phase_coordinates(X, epochs=epochs)
+```
+
+### Pattern 3: Per-cycle diagnostics
+
+```python
+from phase_coordinates import compute_cycle_quality
+
+quality = compute_cycle_quality(X, epochs, sampling_rate_hz=fs)
 ```
 
 ### Bayesian algorithm
@@ -37,9 +68,13 @@ X_hat = reconstruct_phase_coordinates(samples, cycles)
 ```python
 from phase_coordinates import fit_bayesian_phase_coordinates, reconstruct_phase_coordinates
 
-# X: (n_time, 3) array; phase is estimated from the data
+# X: (n_time, 3) array; seed epochs are built internally from the data
 samples, cycles, details = fit_bayesian_phase_coordinates(X, sampling_rate_hz=100.0)
-X_hat = reconstruct_phase_coordinates(samples, cycles)
+
+# Or pass explicit seed_epochs to inspect / override the seed path:
+# samples, cycles, details = fit_bayesian_phase_coordinates(
+#     X, sampling_rate_hz=100.0, seed_epochs=epochs,
+# )
 ```
 
 ## Shared outputs
@@ -104,11 +139,8 @@ X_hat = reconstruct_phase_coordinates(samples, cycles)
 samples, cycles, details = fit_pca_phase_coordinates(
     X,
     *,
-    phase=None,          # pre-computed unwrapped phase
-    ref_signal=None,     # scalar reference for Hilbert phase estimation
-    sampling_rate_hz=None,
-    f_range=None,        # bandpass (low, high) in Hz for Hilbert estimation
-    columns=None,        # subset of DataFrame columns to use
+    epochs,               # CycleEpochs from stage 2 (required)
+    columns=None,         # subset of DataFrame columns to use
     min_samples_per_cycle=10,
 )
 ```
@@ -118,8 +150,8 @@ samples, cycles, details = fit_pca_phase_coordinates(
 **details dict:**
 - `algorithm`: `"pca"`
 - `models`: per-cycle dict with `pca`, `center`, `components`, `explained_variance_ratio`, `indices`
-- `phase_source`: `"provided"` or `"hilbert"`
-- `amp_hilbert`: Hilbert amplitude array (NaN if phase was supplied directly)
+- `epochs_source`: source tag of the input `CycleEpochs`
+- `epochs_metadata`: metadata dict carried from the input epochs
 - `warnings`: list of any collected warnings
 
 ## Algorithm 2: fit_bayesian_phase_coordinates
@@ -128,7 +160,8 @@ samples, cycles, details = fit_pca_phase_coordinates(
 samples, cycles, details = fit_bayesian_phase_coordinates(
     X,
     *,
-    sampling_rate_hz,    # required
+    sampling_rate_hz,             # required
+    seed_epochs=None,              # optional CycleEpochs; built internally if None
     columns=None,
     draws=1000,
     tune=1000,
@@ -179,9 +212,33 @@ samples, cycles, details = fit_bayesian_phase_coordinates(
 
 ## API reference
 
+Phase estimation:
 - `hilbert_phase(ref_signal, fs, f_range)` → `(phase_unwrapped, phase_wrapped, amplitude)`
-- `fit_pca_phase_coordinates(X, ...)` → `(samples, cycles, details)`
-- `fit_bayesian_phase_coordinates(X, *, sampling_rate_hz, ...)` → `(samples, cycles, details)`
+
+Cycle identification (produces `CycleEpochs`):
+- `identify_cycles_from_phase(phase, *, sampling_rate_hz, phase_zero="first_sample")`
+- `epochs_from_boundary_indices(tau_idx, *, sampling_rate_hz, n_time, source, metadata)`
+- `candidate_epochs_from_period_offset(period, offset, *, sampling_rate_hz, n_time, ...)`
+- `find_epochs_by_geometric_score(X, sampling_rate_hz, *, period_candidates, n_phase_offsets=64, ...)`
+- `period_candidates_from_periodogram(ref_signal, fs, ...)` → `list[PeriodCandidate]`
+- `period_candidates_from_autocorrelation(ref_signal, fs, ...)` → `list[PeriodCandidate]`
+- `expand_period_harmonics(candidates, harmonics=(0.5, 1.0, 2.0))`
+- `score_epoch_geometry(X, epochs, sampling_rate_hz, ...)` → `dict`
+
+Coordinate estimation:
+- `fit_pca_phase_coordinates(X, *, epochs, columns=None, min_samples_per_cycle=10)` → `(samples, cycles, details)`
+- `fit_bayesian_phase_coordinates(X, *, sampling_rate_hz, seed_epochs=None, ...)` → `(samples, cycles, details)`
 - `reconstruct_phase_coordinates(samples, cycles)` → `np.ndarray (n_time, 3)`
-- `SAMPLE_COLUMNS` — list of column names for the samples DataFrame
-- `CYCLE_COLUMNS` — list of column names for the cycles DataFrame
+
+Diagnostics:
+- `compute_cycle_quality(X, epochs, *, sampling_rate_hz, columns=None)` → `DataFrame`
+
+Bayesian seed primitives (used internally by `fit_bayesian_phase_coordinates`):
+- `dominant_reference_signal(X)`
+- `estimate_dominant_period(ref_signal, fs)`
+- `seed_boundary_indices(ref_signal, fs, T0)`
+
+Output schema:
+- `CycleEpochs` — dataclass with cycle boundaries and per-sample assignments
+- `SAMPLE_COLUMNS` — column names for the samples DataFrame
+- `CYCLE_COLUMNS` — column names for the cycles DataFrame
