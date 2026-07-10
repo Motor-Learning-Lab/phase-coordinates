@@ -103,7 +103,10 @@ def compute_cycle_quality(
         return pd.DataFrame(columns=_DIAG_COLUMNS)
 
     n_time = X_arr.shape[0]
-    t_end = (n_time - 1) / fs
+    # Cycles are half-open [tau_k, tau_{k+1}); the observed window's closing
+    # edge is n_time / fs (one sample period past the last recorded sample),
+    # matching epochs_from_boundary_indices / candidate_epochs_from_period_offset.
+    t_end = n_time / fs
 
     tau = epochs.tau
     duration = epochs.duration

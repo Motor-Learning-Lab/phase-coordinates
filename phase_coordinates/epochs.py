@@ -82,10 +82,14 @@ class CycleEpochs:
             raise ValueError(f"tau must be 1-D, got shape {tau.shape}.")
         if len(tau) < 1:
             raise ValueError("tau must have at least 1 element.")
+        if not np.all(np.isfinite(tau)):
+            raise ValueError("tau must be finite.")
         if len(tau) >= 2 and np.any(np.diff(tau) <= 0):
             raise ValueError("tau must be strictly increasing.")
 
         duration = np.asarray(self.duration)
+        if not np.all(np.isfinite(duration)):
+            raise ValueError("duration must be finite.")
         expected_duration = np.diff(tau)
         if duration.shape != expected_duration.shape:
             raise ValueError(
@@ -97,10 +101,20 @@ class CycleEpochs:
 
         cycle_index = np.asarray(self.cycle_index)
         time = np.asarray(self.time)
+        if not np.all(np.isfinite(time)):
+            raise ValueError("time must be finite.")
         if cycle_index.shape != time.shape:
             raise ValueError(
                 f"cycle_index has shape {cycle_index.shape} but time has "
                 f"shape {time.shape}; they must match."
+            )
+        K = len(tau) - 1
+        valid_cycle_index = (cycle_index == -1) | ((cycle_index >= 0) & (cycle_index < K))
+        if not np.all(valid_cycle_index):
+            bad = np.unique(cycle_index[~valid_cycle_index])
+            raise ValueError(
+                f"cycle_index must be in {{-1, 0, ..., {K - 1}}} (K={K} "
+                f"cycles); got out-of-range value(s) {bad[:5].tolist()}."
             )
 
         if self.phase is not None:
@@ -110,6 +124,8 @@ class CycleEpochs:
                     f"phase has shape {phase.shape} but time has shape "
                     f"{time.shape}; they must match."
                 )
+            if not np.all(np.isfinite(phase)):
+                raise ValueError("phase must be finite.")
 
         if self.phase_in_cycle is not None:
             phase_in_cycle = np.asarray(self.phase_in_cycle)
@@ -118,6 +134,8 @@ class CycleEpochs:
                     f"phase_in_cycle has shape {phase_in_cycle.shape} but "
                     f"time has shape {time.shape}; they must match."
                 )
+            if not np.all(np.isfinite(phase_in_cycle)):
+                raise ValueError("phase_in_cycle must be finite.")
 
     @property
     def n_cycles(self) -> int:
@@ -332,9 +350,14 @@ def epochs_from_boundary_indices(
 
     Notes
     -----
-    Samples before ``tau_idx[0]`` or at/after ``tau_idx[-1]`` (translated to
-    seconds and compared to ``time``) get ``cycle_index = -1``.  Boundary
-    indices must be strictly increasing.
+    Cycles are half-open sample intervals ``[tau_k, tau_{k+1})``.  Samples
+    before ``tau_idx[0]`` or at/after ``tau_idx[-1]`` (translated to seconds
+    and compared to ``time``) get ``cycle_index = -1``.  ``tau_idx[-1]`` may
+    equal ``n_time`` (one past the last valid sample index) to close the
+    final cycle deterministically without requiring a real sample there;
+    see :func:`~phase_coordinates.scoring.candidate_epochs_from_period_offset`
+    for the same convention applied to regularly-spaced candidates.
+    Boundary indices must be strictly increasing.
     """
     tau_idx = np.asarray(tau_idx, dtype=int)
     if tau_idx.ndim != 1:

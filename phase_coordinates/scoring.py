@@ -57,9 +57,19 @@ def candidate_epochs_from_period_offset(
     Build regularly-spaced :class:`CycleEpochs` from a (period, offset) pair.
 
     Boundary times are ``tau_k = offset + k * period`` for
-    ``k = 0, 1, 2, ...`` while ``tau_k <= (n_time - 1) / fs``.  Only complete
-    cycles fully contained in the observed window are kept — no clamping or
-    extrapolation.
+    ``k = 0, 1, 2, ...`` while ``tau_k <= n_time / fs``.  Cycles are
+    half-open sample intervals ``[tau_k, tau_{k+1})``, so the final boundary
+    may land exactly one sample period past the last recorded sample
+    (``n_time / fs``) without requiring data there — this matches
+    :func:`~phase_coordinates.epochs.epochs_from_boundary_indices`, which
+    accepts a closing boundary index of ``n_time``.  Only complete cycles
+    fully contained in the observed window are kept — no clamping or
+    extrapolation.  Anchor interpolation (:func:`score_epoch_geometry`) only
+    ever queries times at ``tau[:-1]`` and interior quarter points, never at
+    the closing boundary itself, so this relaxation never causes
+    interpolation past the last real sample;
+    :func:`~phase_coordinates.geometry.interp_X_at_times` still raises if a
+    caller ever does query past the data window.
 
     Parameters
     ----------
@@ -92,7 +102,7 @@ def candidate_epochs_from_period_offset(
     if n_time <= 0:
         raise ValueError(f"n_time must be positive, got {n_time}.")
 
-    t_end = (n_time - 1) / fs
+    t_end = n_time / fs
     # tau_k = offset + k * period; keep k with tau_k <= t_end
     k_max = int(np.floor((t_end - offset) / period))
     if k_max < 1:
@@ -177,7 +187,7 @@ def score_epoch_geometry(
         ``min_samples_per_cycle``, ``n_cycles``, ``fraction_samples_assigned``
         (fraction of input samples with ``cycle_index >= 0``),
         ``coverage_duration_fraction`` (``(tau[-1] - tau[0]) /
-        ((n_time - 1) / fs)``), and ``per_cycle`` (list of dicts, one per
+        (n_time / fs)``), and ``per_cycle`` (list of dicts, one per
         cycle).  The coverage metrics are report-only: they are not folded
         into ``total_score``, so two candidates with identical planarity and
         anchor geometry but very different coverage (e.g. 30% vs 90% of the
@@ -306,7 +316,7 @@ def score_epoch_geometry(
         total = float("-inf")
 
     fraction_samples_assigned = float(np.sum(epochs.cycle_index >= 0)) / n_time
-    total_duration = (n_time - 1) / fs
+    total_duration = n_time / fs
     coverage_duration_fraction = (
         float((tau[-1] - tau[0]) / total_duration) if total_duration > 0 else 0.0
     )

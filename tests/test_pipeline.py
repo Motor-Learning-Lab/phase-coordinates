@@ -227,28 +227,16 @@ def test_period_candidates_autocorrelation_finds_1s():
 # ---------------------------------------------------------------------------
 
 def test_candidate_epochs_exact_cycle_count():
+    # Samples 0..399 span times [0, 4.0) s at fs=100 Hz (n_time / fs = 4.0 s).
+    # Cycles are half-open [tau_k, tau_{k+1}), so 1 s cycles starting at 0
+    # cover [0,1), [1,2), [2,3), [3,4) -- 4 complete cycles, with the final
+    # boundary landing exactly at n_time / fs (one sample period past the
+    # last recorded sample). This matches the epochs_from_boundary_indices
+    # convention, where a closing boundary index of n_time is likewise
+    # allowed.
     epochs = candidate_epochs_from_period_offset(
         period=1.0, offset=0.0,
         sampling_rate_hz=100.0, n_time=400,
-    )
-    # Boundaries at 0, 1, 2, 3, 4 s -> but tau[-1] must be <= (n-1)/fs = 3.99 s.
-    # So tau = [0, 1, 2, 3] and 3 complete cycles fit? Let's check.
-    # (n_time - 1) / fs = 3.99 s -> k_max = floor((3.99 - 0)/1.0) = 3 -> tau = [0,1,2,3]
-    # -> 3 cycles.  But the task says exactly 4 cycles.  Reconsider: the task
-    # description says "n_time=400" should yield 4 complete cycles.  This
-    # matches when we accept tau <= (n_time)/fs = 4.0 s.  We use strict
-    # (n_time - 1) / fs so cycle 4 would end past the last sample and gets
-    # dropped.
-    #
-    # Reinterpret: samples 0..399, times 0..3.99 s.  Cycles of duration 1 s
-    # starting at 0 cover [0,1), [1,2), [2,3), [3,4) -- 4 cycles.  The last
-    # boundary should be 4.0 s.  We want this test to pass, so treat 4.0 as
-    # "within one sample" of the end.  Adjust: our implementation uses <=
-    # (n_time - 1) / fs which is stricter.  Given the task's example, use
-    # n_time = 401 to get exactly 4 cycles under our contract.
-    epochs = candidate_epochs_from_period_offset(
-        period=1.0, offset=0.0,
-        sampling_rate_hz=100.0, n_time=401,
     )
     assert epochs.n_cycles == 4
     np.testing.assert_allclose(epochs.tau, [0.0, 1.0, 2.0, 3.0, 4.0])
@@ -332,3 +320,84 @@ def test_compute_cycle_quality_shape_and_finite():
     # should agree with the sign-aligned one here.
     assert (q["signed_orientation_score"] > 0.9).all()
     assert q["edge_valid"].all()
+
+
+# ---------------------------------------------------------------------------
+# 13. CycleEpochs.__post_init__ invariant validation
+# ---------------------------------------------------------------------------
+
+def _valid_epochs_kwargs():
+    """A minimal, valid set of CycleEpochs field values (K=2 cycles, n_time=4)."""
+    tau = np.array([0.0, 1.0, 2.0])
+    time = np.array([0.0, 0.5, 1.0, 1.5])
+    return dict(
+        tau=tau,
+        duration=np.diff(tau),
+        cycle_index=np.array([0, 0, 1, 1]),
+        phase=np.array([0.0, np.pi, 2 * np.pi, 3 * np.pi]),
+        phase_in_cycle=np.array([0.0, np.pi, 0.0, np.pi]),
+        time=time,
+        source="test",
+    )
+
+
+def test_cycle_epochs_valid_construction_ok():
+    epochs = CycleEpochs(**_valid_epochs_kwargs())
+    assert epochs.n_cycles == 2
+
+
+def test_cycle_epochs_rejects_non_finite_tau():
+    kwargs = _valid_epochs_kwargs()
+    kwargs["tau"] = np.array([0.0, np.nan, 2.0])
+    with pytest.raises(ValueError, match="tau must be finite"):
+        CycleEpochs(**kwargs)
+
+
+def test_cycle_epochs_rejects_non_finite_duration():
+    kwargs = _valid_epochs_kwargs()
+    kwargs["duration"] = np.array([1.0, np.inf])
+    with pytest.raises(ValueError, match="duration must be finite"):
+        CycleEpochs(**kwargs)
+
+
+def test_cycle_epochs_rejects_non_finite_time():
+    kwargs = _valid_epochs_kwargs()
+    kwargs["time"] = np.array([0.0, 0.5, np.nan, 1.5])
+    with pytest.raises(ValueError, match="time must be finite"):
+        CycleEpochs(**kwargs)
+
+
+def test_cycle_epochs_rejects_non_finite_phase():
+    kwargs = _valid_epochs_kwargs()
+    kwargs["phase"] = np.array([0.0, np.nan, 2 * np.pi, 3 * np.pi])
+    with pytest.raises(ValueError, match="phase must be finite"):
+        CycleEpochs(**kwargs)
+
+
+def test_cycle_epochs_rejects_non_finite_phase_in_cycle():
+    kwargs = _valid_epochs_kwargs()
+    kwargs["phase_in_cycle"] = np.array([0.0, np.inf, 0.0, np.pi])
+    with pytest.raises(ValueError, match="phase_in_cycle must be finite"):
+        CycleEpochs(**kwargs)
+
+
+@pytest.mark.parametrize("bad_value", [-2, 2, 100])
+def test_cycle_epochs_rejects_out_of_range_cycle_index(bad_value):
+    kwargs = _valid_epochs_kwargs()
+    kwargs["cycle_index"] = np.array([0, 0, 1, bad_value])
+    with pytest.raises(ValueError, match="cycle_index must be in"):
+        CycleEpochs(**kwargs)
+
+
+def test_cycle_epochs_allows_all_unassigned_cycle_index():
+    """-1 is always valid, even with zero cycles (tau has length 1)."""
+    epochs = CycleEpochs(
+        tau=np.array([0.0]),
+        duration=np.array([]),
+        cycle_index=np.array([-1, -1, -1]),
+        phase=None,
+        phase_in_cycle=None,
+        time=np.array([0.0, 0.5, 1.0]),
+        source="test",
+    )
+    assert epochs.n_cycles == 0
