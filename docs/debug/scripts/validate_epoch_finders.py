@@ -50,7 +50,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from phase_coordinates import (  # noqa: E402
     CycleEpochs,
-    candidate_epochs_from_period_offset,  # noqa: F401  (used implicitly via find_epochs_by_geometric_score)
+    candidate_epochs_from_period_offset,
     compute_cycle_quality,
     dominant_reference_signal,
     epochs_from_boundary_indices,
@@ -471,23 +471,187 @@ def run_all(n_phase_offsets: int = 64) -> tuple[pd.DataFrame, pd.DataFrame, dict
     return metrics_df, top_candidates_df, cycle_quality
 
 
+# ---------------------------------------------------------------------------
+# Winding diagnostic checks: deliberate multi-lap / fractional-lap / reversal
+# probes, direct against candidate_epochs_from_period_offset + score_epoch_geometry
+# (bypassing period search entirely -- these test the winding *diagnostic*
+# and *validity rule* themselves against known period errors, not the
+# search that finds periods; period-search-driven multi-lap/fractional-lap
+# behavior is already exercised indirectly through the SCENARIOS above,
+# e.g. phase_offset_start).
+# ---------------------------------------------------------------------------
+
+WINDING_CHECK_COLUMNS = [
+    "check", "description", "winding_median_abs", "winding_min_abs",
+    "winding_max_abs", "expected_abs_winding_range", "expected_valid",
+    "actually_valid", "passed",
+]
+
+
+def _winding_check(
+    results: list, name: str, description: str, X: np.ndarray, fs: float,
+    epochs: CycleEpochs, expected_abs_winding_range: tuple, expect_valid: bool,
+    *, winding_min_fraction: float = 0.8,
+):
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    winding_median_abs = score["winding_median_abs"]
+    lo, hi = expected_abs_winding_range
+    in_expected_range = (
+        np.isfinite(winding_median_abs) and lo <= winding_median_abs <= hi
+    )
+    actually_valid = score["fraction_single_lap_cycles"] >= winding_min_fraction
+    passed = in_expected_range and (actually_valid == expect_valid)
+    results.append({
+        "check": name,
+        "description": description,
+        "winding_median_abs": winding_median_abs,
+        "winding_min_abs": score["winding_min_abs"],
+        "winding_max_abs": score["winding_max_abs"],
+        "expected_abs_winding_range": expected_abs_winding_range,
+        "expected_valid": expect_valid,
+        "actually_valid": actually_valid,
+        "passed": passed,
+    })
+    return score
+
+
+def run_winding_diagnostic_checks() -> pd.DataFrame:
+    """
+    Deliberate probes of the winding diagnostic in both directions of
+    period error, plus mild-warp tolerance and traversal-reversal, using
+    candidate epochs built directly at known period multiples/fractions of
+    the true period (not from period search -- these test the diagnostic's
+    math and the validity rule, independent of whether period search would
+    ever actually propose these periods).
+    """
+    results: list = []
+
+    base = make_clean_complete_cycles()
+    n_time = len(base.X)
+
+    # 1. True-period candidate: winding ~ 1, must be valid.
+    epochs_true = candidate_epochs_from_period_offset(
+        base.true_period, 0.0, sampling_rate_hz=base.fs, n_time=n_time,
+    )
+    _winding_check(
+        results, "true_period", "period = 1x true period",
+        base.X, base.fs, epochs_true, (0.9, 1.1), True,
+    )
+
+    # 2. Multi-lap candidates: 2x and 3x the true period, winding ~ 2 / ~3,
+    #    must be invalid (retracing the same loop multiple times per cycle).
+    epochs_2x = candidate_epochs_from_period_offset(
+        2 * base.true_period, 0.0, sampling_rate_hz=base.fs, n_time=n_time,
+    )
+    _winding_check(
+        results, "multi_lap_2x", "period = 2x true period",
+        base.X, base.fs, epochs_2x, (1.8, 2.2), False,
+    )
+
+    epochs_3x = candidate_epochs_from_period_offset(
+        3 * base.true_period, 0.0, sampling_rate_hz=base.fs, n_time=n_time,
+    )
+    _winding_check(
+        results, "multi_lap_3x", "period = 3x true period",
+        base.X, base.fs, epochs_3x, (2.8, 3.2), False,
+    )
+
+    # 3. Fractional-lap candidate: 0.5x the true period, must be invalid
+    #    (each proposed cycle covers only half a revolution). The expected
+    #    winding is NOT ~0.5, though -- verified analytically and
+    #    empirically (see docs/debug/epoch_finder_validation_report.md):
+    #    the per-cycle center is the sample mean of that cycle's own
+    #    points, reused from the existing planarity computation. Averaged
+    #    over a *partial* arc, that mean sits off-center (a half-arc's
+    #    centroid is 2/pi from the true circle center along the symmetry
+    #    axis, not at the center), which inflates the apparent angular
+    #    sweep measured around it. A full or multi-lap candidate doesn't
+    #    have this bias -- averaging over one or more *complete*
+    #    revolutions of a symmetric shape correctly cancels to the true
+    #    center. Measured ~0.673 here (analytic continuous limit ~0.680);
+    #    still well outside DEFAULT_WINDING_VALID_MIN (0.75), so the
+    #    validity decision is unaffected -- but this is a real reason not
+    #    to lower winding_valid_min much below its default without
+    #    re-checking against this bias.
+    epochs_half = candidate_epochs_from_period_offset(
+        0.5 * base.true_period, 0.0, sampling_rate_hz=base.fs, n_time=n_time,
+    )
+    _winding_check(
+        results, "fractional_lap_0.5x", "period = 0.5x true period",
+        base.X, base.fs, epochs_half, (0.60, 0.75), False,
+    )
+
+    # 4. mild_phase_warp: true-period candidate must remain valid despite
+    #    non-constant angular velocity within each cycle.
+    warp = make_mild_phase_warp()
+    epochs_warp = candidate_epochs_from_period_offset(
+        warp.true_period, 0.0, sampling_rate_hz=warp.fs, n_time=len(warp.X),
+    )
+    _winding_check(
+        results, "mild_phase_warp", "true period, non-constant angular velocity",
+        warp.X, warp.fs, epochs_warp, (0.9, 1.1), True,
+    )
+
+    # 5. Traversal reversal: reverse the clean dataset in time (same loop,
+    #    opposite direction). Signed winding should flip sign; abs(winding)
+    #    should remain valid.
+    X_reversed = base.X[::-1]
+    epochs_reversed = candidate_epochs_from_period_offset(
+        base.true_period, 0.0, sampling_rate_hz=base.fs, n_time=n_time,
+    )
+    score_forward = score_epoch_geometry(base.X, epochs_true, sampling_rate_hz=base.fs)
+    score_reversed = _winding_check(
+        results, "traversal_reversal", "same loop, reversed time order",
+        X_reversed, base.fs, epochs_reversed, (0.9, 1.1), True,
+    )
+    signed_forward = [c["winding"] for c in score_forward["per_cycle"] if np.isfinite(c["winding"])]
+    signed_reversed = [c["winding"] for c in score_reversed["per_cycle"] if np.isfinite(c["winding"])]
+    sign_flipped = (
+        len(signed_forward) > 0 and len(signed_reversed) > 0
+        and np.sign(np.median(signed_forward)) == -np.sign(np.median(signed_reversed))
+    )
+    results.append({
+        "check": "traversal_reversal_sign",
+        "description": "signed winding flips sign under time reversal",
+        "winding_median_abs": float("nan"),
+        "winding_min_abs": float("nan"),
+        "winding_max_abs": float("nan"),
+        "expected_abs_winding_range": None,
+        "expected_valid": True,
+        "actually_valid": bool(sign_flipped),
+        "passed": bool(sign_flipped),
+    })
+
+    return pd.DataFrame(results, columns=WINDING_CHECK_COLUMNS)
+
+
 def main():
     pd.set_option("display.width", 200)
     pd.set_option("display.max_columns", 30)
 
     metrics_df, top_candidates_df, _ = run_all()
+    winding_checks_df = run_winding_diagnostic_checks()
 
     out_dir = Path(__file__).resolve().parents[1]  # docs/debug/
     metrics_path = out_dir / "epoch_finder_metrics.csv"
     candidates_path = out_dir / "epoch_finder_top_candidates.csv"
+    winding_checks_path = out_dir / "epoch_finder_winding_checks.csv"
     metrics_df.to_csv(metrics_path, index=False)
     top_candidates_df.to_csv(candidates_path, index=False)
+    winding_checks_df.to_csv(winding_checks_path, index=False)
 
     print("=== Metrics summary (all scenarios x methods) ===")
     print(metrics_df.to_string(index=False))
     print()
+    print("=== Winding diagnostic checks ===")
+    print(winding_checks_df.to_string(index=False))
+    if not winding_checks_df["passed"].all():
+        failed = winding_checks_df.loc[~winding_checks_df["passed"], "check"].tolist()
+        print(f"\n!!! {len(failed)} winding check(s) FAILED: {failed}")
+    print()
     print(f"Wrote {metrics_path}")
     print(f"Wrote {candidates_path}")
+    print(f"Wrote {winding_checks_path}")
 
 
 if __name__ == "__main__":

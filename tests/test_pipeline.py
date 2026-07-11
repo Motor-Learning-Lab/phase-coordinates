@@ -19,6 +19,7 @@ from phase_coordinates import (
     dominant_reference_signal,
     epochs_from_boundary_indices,
     estimate_dominant_period,
+    expand_period_harmonics,
     find_epochs_by_geometric_score,
     fit_pca_phase_coordinates,
     hilbert_phase,
@@ -279,6 +280,8 @@ def test_find_epochs_by_geometric_score_locks_onto_1s_period():
         "planarity", "quarter_anchor_orth_ratio", "anchor_norm",
         "fraction_samples_assigned", "min_samples_per_cycle",
         "coverage_duration_fraction", "candidate_source",
+        "winding_median_abs", "winding_min_abs", "winding_max_abs",
+        "fraction_single_lap_cycles", "winding_valid",
     ]
     assert (table["fraction_samples_assigned"] >= 0).all()
     assert (table["fraction_samples_assigned"] <= 1).all()
@@ -289,6 +292,14 @@ def test_find_epochs_by_geometric_score_locks_onto_1s_period():
     }
     assert len(table) > 0
     assert best_epochs.source == "geometric_score"
+    # The winner should be a genuine single-lap candidate.
+    winner_row = table[
+        (table["period"] == winner_period)
+        & np.isclose(table["offset"], float(best_epochs.metadata["offset"]))
+    ]
+    assert winner_row["winding_valid"].all()
+    assert (table["fraction_single_lap_cycles"] >= 0).all()
+    assert (table["fraction_single_lap_cycles"] <= 1).all()
 
 
 # ---------------------------------------------------------------------------
@@ -496,3 +507,201 @@ def test_find_epochs_by_geometric_score_selection_tolerance_is_absolute():
     )
     # Coverage-aware selection can only match or beat plain argmax on cycle count.
     assert epochs_tolerant.n_cycles >= epochs_strict.n_cycles
+
+
+# ---------------------------------------------------------------------------
+# 16. Winding diagnostic and validity filter
+# ---------------------------------------------------------------------------
+
+def _clean_circle_epochs(n_cycles=6, samples_per_cycle=100, period=1.0):
+    """A clean tilted circle plus a matching true-period CycleEpochs,
+    reused across the winding tests below."""
+    X, phase, fs = _tilted_circle(n_cycles=n_cycles, samples_per_cycle=samples_per_cycle)
+    n_time = X.shape[0]
+    epochs = candidate_epochs_from_period_offset(
+        period, 0.0, sampling_rate_hz=fs, n_time=n_time,
+    )
+    return X, fs, epochs
+
+
+def test_winding_single_clean_lap_is_accepted():
+    X, fs, epochs = _clean_circle_epochs()
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    assert 0.9 <= score["winding_median_abs"] <= 1.1
+    assert score["fraction_single_lap_cycles"] == 1.0
+    for c in score["per_cycle"]:
+        assert 0.9 <= abs(c["winding"]) <= 1.1
+
+
+@pytest.mark.parametrize("multiplier,expected_abs_winding", [(2.0, 2.0), (3.0, 3.0)])
+def test_winding_multi_lap_candidates_are_rejected(multiplier, expected_abs_winding):
+    """A period that's an exact integer multiple of the true one retraces
+    the same physical loop multiple times per proposed cycle."""
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=100)
+    n_time = X.shape[0]
+    epochs = candidate_epochs_from_period_offset(
+        multiplier * 1.0, 0.0, sampling_rate_hz=fs, n_time=n_time,
+    )
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    assert abs(score["winding_median_abs"] - expected_abs_winding) < 0.3
+    assert score["fraction_single_lap_cycles"] < 0.5
+
+
+def test_winding_half_lap_candidates_are_rejected():
+    """A period that's a fraction of the true one only covers part of a
+    revolution per proposed cycle. The measured winding is biased above the
+    naive 0.5 guess (the per-cycle center is the sample mean of a *partial*
+    arc, which sits off the true circle center -- see
+    docs/debug/epoch_finder_validation_report.md), but it must still fall
+    outside the valid range and be rejected."""
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=100)
+    n_time = X.shape[0]
+    epochs = candidate_epochs_from_period_offset(
+        0.5, 0.0, sampling_rate_hz=fs, n_time=n_time,
+    )
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    assert score["winding_median_abs"] < 0.75
+    assert score["fraction_single_lap_cycles"] == 0.0
+
+
+def test_winding_reversed_traversal_has_negative_signed_winding():
+    """Reversing the *order* of one cycle's own points (not the whole
+    multi-cycle recording) keeps the per-cycle PCA fit identical between the
+    forward and reversed calls -- fit is order-invariant, depending only on
+    the point *set* -- isolating the effect of traversal direction from
+    PCA's independently-arbitrary axis sign (which a symmetric circle
+    otherwise confounds: refitting PCA separately on forward vs. reversed
+    multi-cycle data can pick differently-signed axes for reasons unrelated
+    to traversal direction)."""
+    fs = 100.0
+    n = 100
+    t = np.arange(n) / fs
+    phase = 2 * np.pi * t  # exactly one lap
+    tilt = np.pi / 6
+    X_k = np.column_stack([
+        np.cos(phase), np.sin(phase) * np.cos(tilt), np.sin(phase) * np.sin(tilt),
+    ])
+    epochs = candidate_epochs_from_period_offset(1.0, 0.0, sampling_rate_hz=fs, n_time=n)
+
+    score_forward = score_epoch_geometry(X_k, epochs, sampling_rate_hz=fs)
+    score_reversed = score_epoch_geometry(X_k[::-1], epochs, sampling_rate_hz=fs)
+    w_fwd = score_forward["per_cycle"][0]["winding"]
+    w_rev = score_reversed["per_cycle"][0]["winding"]
+
+    assert np.isfinite(w_fwd) and np.isfinite(w_rev)
+    assert np.sign(w_fwd) == -np.sign(w_rev)
+    # abs(winding) validity is direction-independent.
+    assert 0.9 <= abs(w_rev) <= 1.1
+    assert score_reversed["fraction_single_lap_cycles"] == 1.0
+
+
+def test_winding_accepts_mild_phase_warp():
+    fs = 100.0
+    period = 1.0
+    n_cycles = 6
+    n_time = n_cycles * 100 + 1
+    t = np.arange(n_time) / fs
+    tilt = np.pi / 6
+    phase = 2 * np.pi * t / period + 0.3 * np.sin(2 * np.pi * t / period)
+    X = np.column_stack([
+        np.cos(phase), np.sin(phase) * np.cos(tilt), np.sin(phase) * np.sin(tilt),
+    ])
+    epochs = candidate_epochs_from_period_offset(period, 0.0, sampling_rate_hz=fs, n_time=n_time)
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    assert 0.9 <= score["winding_median_abs"] <= 1.1
+    assert score["fraction_single_lap_cycles"] >= 0.8
+
+
+def test_winding_near_center_degeneracy_excludes_but_does_not_crash():
+    """A few points collapsed near the fitted center have an unstable angle
+    and should be excluded from the winding sum (not corrupt it), while
+    being visible in the transition-count diagnostics."""
+    X, fs, epochs = _clean_circle_epochs()
+    idx0 = np.where(epochs.cycle_index == 0)[0]
+    X_degenerate = X.copy()
+    center0 = X[idx0].mean(axis=0)
+    # Collapse 2 of the ~100 samples in cycle 0 onto the center.
+    X_degenerate[idx0[10]] = center0
+    X_degenerate[idx0[11]] = center0 + 1e-10
+
+    score = score_epoch_geometry(X_degenerate, epochs, sampling_rate_hz=fs)
+    cycle0 = score["per_cycle"][0]
+    assert np.isfinite(cycle0["winding"])
+    assert 0.9 <= abs(cycle0["winding"]) <= 1.1
+    assert cycle0["winding_n_valid_transitions"] < cycle0["winding_n_total_transitions"]
+
+
+def test_winding_mostly_degenerate_cycle_is_undefined_not_silently_valid():
+    """If most of a cycle's samples are too close to the center for a
+    reliable angle, winding must be NaN, not a value computed from an
+    unreliable minority -- and NaN must not count as single-lap.
+
+    Exercises the internal _cycle_winding helper directly, since the real
+    per-cycle center (score_epoch_geometry always passes center_k =
+    X_k.mean(axis=0)) is a moving target: collapsing a majority of points
+    toward an *externally* chosen point shifts the recomputed mean away
+    from that point, so the "collapsed" points end up with a nonzero radius
+    from the true center after all, defeating a naive construction. Fixed
+    here by collapsing the majority onto the mean of the *remaining*
+    (real-arc) points: since sum(10 real points) = 10 * arc_mean by
+    definition, mean(90 copies of arc_mean + those 10 points) works out to
+    exactly arc_mean again -- i.e. the collapsed points land exactly on the
+    true center by construction, algebraically, not by trial and error."""
+    from sklearn.decomposition import PCA
+    from phase_coordinates.scoring import _cycle_winding
+
+    n = 100
+    theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    X_k = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(n)])
+    arc_mean = X_k[90:].mean(axis=0)
+    X_k[:90] = arc_mean
+    center_k = X_k.mean(axis=0)
+    np.testing.assert_allclose(center_k, arc_mean)  # sanity-check the algebra above
+    pca = PCA(n_components=3)
+    pca.fit(X_k - center_k)
+
+    winding, n_valid, n_total = _cycle_winding(X_k, center_k, pca)
+    assert not np.isfinite(winding)
+    assert n_total == n - 1
+    assert n_valid / n_total < 0.5
+
+
+def test_candidate_table_retains_rejected_candidates_with_winding_diagnostics():
+    """Rejected (winding-invalid) candidates must remain visible in the
+    table, not be silently dropped from reporting."""
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=100, noise_std=0.01)
+    ref = dominant_reference_signal(X)
+    cands = period_candidates_from_periodogram(ref, fs, n_candidates=5)
+    cands = expand_period_harmonics(cands)  # pulls in a 0.5x/2x candidate too
+    _, table = find_epochs_by_geometric_score(X, fs, period_candidates=cands, n_phase_offsets=16)
+
+    for col in ("winding_median_abs", "winding_min_abs", "winding_max_abs",
+                "fraction_single_lap_cycles", "winding_valid"):
+        assert col in table.columns
+    assert (~table["winding_valid"]).any(), "expected at least one rejected candidate in the table"
+    assert table["winding_valid"].any(), "expected at least one accepted candidate in the table"
+    # Rejected rows still carry real (non-null) winding diagnostics.
+    rejected = table[~table["winding_valid"]]
+    assert rejected["fraction_single_lap_cycles"].notna().all()
+
+
+def test_require_winding_valid_false_falls_back_to_score_tolerance_only():
+    """The winding filter is opt-out (require_winding_valid=False), kept
+    for direct comparison against plain score_tolerance selection -- not
+    because it's optional in normal use."""
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=100, noise_std=0.01)
+    ref = dominant_reference_signal(X)
+    cands = period_candidates_from_periodogram(ref, fs, n_candidates=5)
+    cands = expand_period_harmonics(cands)
+    epochs_no_filter, _ = find_epochs_by_geometric_score(
+        X, fs, period_candidates=cands, n_phase_offsets=16,
+        require_winding_valid=False,
+    )
+    epochs_filtered, _ = find_epochs_by_geometric_score(
+        X, fs, period_candidates=cands, n_phase_offsets=16,
+        require_winding_valid=True,
+    )
+    # Both must produce a result; the filtered winner must be winding-valid.
+    score_filtered = score_epoch_geometry(X, epochs_filtered, sampling_rate_hz=fs)
+    assert score_filtered["fraction_single_lap_cycles"] >= 0.8
+    assert epochs_no_filter.n_cycles >= 2

@@ -28,6 +28,85 @@ DEFAULT_SCORE_WEIGHTS = {
     "anchor_norm": 0.2,
 }
 
+# Default "approximately one revolution" range for the winding validity
+# check (see score_epoch_geometry / find_epochs_by_geometric_score). A
+# starting point per the task that introduced it, sensitivity-checked
+# against the validation suite in docs/debug/epoch_finder_validation_report.md
+# rather than assumed correct.
+DEFAULT_WINDING_VALID_MIN = 0.75
+DEFAULT_WINDING_VALID_MAX = 1.25
+
+# A sample is excluded from the winding calculation (and any transition
+# touching it) if its in-plane radius from the cycle center is below this
+# fraction of the cycle's own median radius -- close to the center, the
+# angle atan2(v, u) is dominated by noise, not genuine rotation. This is a
+# numerical-stability detail of *computing* the diagnostic, not a
+# user-facing validity setting (see DEFAULT_WINDING_VALID_MIN/MAX above for
+# that), so it stays a module constant rather than a keyword argument.
+_WINDING_DEGENERATE_RADIUS_FRAC = 0.05
+
+# If fewer than this fraction of a cycle's consecutive-sample transitions
+# have a well-defined angle (both endpoints outside the degenerate-radius
+# zone), the cycle's winding is left undefined (NaN) rather than computed
+# from an unreliable minority of samples -- see _cycle_winding.
+_WINDING_MIN_VALID_TRANSITION_FRACTION = 0.5
+
+
+def _cycle_winding(X_k, center_k, pca):
+    """
+    Signed winding number (revolutions, in time order) of one cycle's
+    samples, using the in-plane (PC1, PC2) coordinates of an *already
+    fitted* per-cycle PCA (reused from :func:`score_epoch_geometry`'s
+    planarity computation -- this only calls ``pca.transform``, an O(n)
+    projection, not a new fit).
+
+    For each consecutive pair of centered in-plane vectors (u_i, v_i) and
+    (u_{i+1}, v_{i+1}), the signed angle between them is
+    ``atan2(cross, dot)`` where ``cross = u_i*v_{i+1} - v_i*u_{i+1}`` and
+    ``dot = u_i*u_{i+1} + v_i*v_{i+1}``; the winding number is the sum of
+    these per-step angles divided by ``2*pi``.
+
+    Samples whose in-plane radius is too small relative to the cycle's own
+    median radius are excluded pairwise (their angle is unstable, not
+    meaningful) -- see ``_WINDING_DEGENERATE_RADIUS_FRAC``. If that leaves
+    too few well-defined transitions (``_WINDING_MIN_VALID_TRANSITION_FRACTION``),
+    the winding is undefined (NaN): a cycle that is mostly degenerate gives
+    no reliable evidence either way and must not be silently treated as a
+    valid single lap.
+
+    Returns
+    -------
+    winding : float
+        Signed winding number, or NaN if undefined.
+    n_valid_transitions, n_total_transitions : int
+        Diagnostic counts (e.g. for reporting how much of a cycle was
+        usable).
+    """
+    n_k = X_k.shape[0]
+    n_total = max(0, n_k - 1)
+    if n_k < 3:
+        return float("nan"), 0, n_total
+
+    scores = pca.transform(X_k - center_k)
+    u, v = scores[:, 0], scores[:, 1]
+    r = np.hypot(u, v)
+    radius_scale = float(np.median(r))
+    if not np.isfinite(radius_scale) or radius_scale < 1e-12:
+        return float("nan"), 0, n_total
+
+    valid_point = r >= _WINDING_DEGENERATE_RADIUS_FRAC * radius_scale
+    valid_transition = valid_point[:-1] & valid_point[1:]
+    n_valid = int(np.sum(valid_transition))
+
+    if n_total == 0 or n_valid / n_total < _WINDING_MIN_VALID_TRANSITION_FRACTION:
+        return float("nan"), n_valid, n_total
+
+    cross = u[:-1] * v[1:] - v[:-1] * u[1:]
+    dot = u[:-1] * u[1:] + v[:-1] * v[1:]
+    delta_theta = np.arctan2(cross, dot)
+    winding = float(np.sum(delta_theta[valid_transition]) / (2 * np.pi))
+    return winding, n_valid, n_total
+
 
 def _resolve_X_and_columns(X, columns):
     if isinstance(X, pd.DataFrame):
@@ -145,6 +224,8 @@ def score_epoch_geometry(
     sampling_rate_hz: float,
     columns: Optional[list] = None,
     weights: Optional[dict] = None,
+    winding_valid_min: float = DEFAULT_WINDING_VALID_MIN,
+    winding_valid_max: float = DEFAULT_WINDING_VALID_MAX,
 ) -> dict:
     """
     Score how "cycle-like" the geometry of each epoch is.
@@ -163,6 +244,14 @@ def score_epoch_geometry(
       ``a90_orth`` is the component of the quarter-cycle anchor perpendicular
       to ``a0``.  Closer to 1 means the quarter-cycle anchor is truly
       "sideways" from the phase-zero anchor.
+    - **winding** = signed revolutions completed by the cycle's samples in
+      time order (see :func:`_cycle_winding`). None of ``planarity``,
+      ``anchor_norm``, or ``quarter_anchor_orth_ratio`` can tell a single
+      lap from an exact integer multiple of it (retracing the same planar
+      loop looks identical on all three); winding is the diagnostic that
+      can. It is *not* folded into ``total_score`` -- see
+      :func:`find_epochs_by_geometric_score` for how it's used as a
+      candidate validity filter instead.
 
     Parameters
     ----------
@@ -178,6 +267,11 @@ def score_epoch_geometry(
         Mapping used to combine the score components into ``total_score``.
         Missing keys fall back to :data:`DEFAULT_SCORE_WEIGHTS`.  Weights are
         rescaled to sum to 1.
+    winding_valid_min, winding_valid_max : float
+        Range of ``abs(winding)`` counted as "approximately one lap" when
+        computing ``fraction_single_lap_cycles`` below. This function only
+        *reports* the fraction; :func:`find_epochs_by_geometric_score` is
+        where it becomes an accept/reject decision.
 
     Returns
     -------
@@ -187,12 +281,19 @@ def score_epoch_geometry(
         ``min_samples_per_cycle``, ``n_cycles``, ``fraction_samples_assigned``
         (fraction of input samples with ``cycle_index >= 0``),
         ``coverage_duration_fraction`` (``(tau[-1] - tau[0]) /
-        (n_time / fs)``), and ``per_cycle`` (list of dicts, one per
-        cycle).  The coverage metrics are report-only: they are not folded
-        into ``total_score``, so two candidates with identical planarity and
-        anchor geometry but very different coverage (e.g. 30% vs 90% of the
-        recording assigned to cycles) score identically on ``total_score``
-        alone — inspect the coverage columns separately.
+        (n_time / fs)``), ``winding_median_abs``, ``winding_min_abs``,
+        ``winding_max_abs`` (per-cycle ``abs(winding)`` statistics, ``nan``
+        if every cycle is winding-degenerate), ``fraction_single_lap_cycles``
+        (fraction of *all* cycles -- including winding-degenerate ones,
+        which never count as single-lap -- with ``abs(winding)`` in
+        ``[winding_valid_min, winding_valid_max]``), and ``per_cycle`` (list
+        of dicts, one per cycle, each including a signed ``winding``, and
+        ``winding_n_valid_transitions`` / ``winding_n_total_transitions``).
+        The coverage and winding metrics are report-only: they are not
+        folded into ``total_score``, so two candidates with identical
+        planarity and anchor geometry but very different coverage or
+        winding score identically on ``total_score`` alone — inspect those
+        columns separately.
     """
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
@@ -220,6 +321,10 @@ def score_epoch_geometry(
             "n_cycles": 0,
             "fraction_samples_assigned": 0.0,
             "coverage_duration_fraction": 0.0,
+            "winding_median_abs": float("nan"),
+            "winding_min_abs": float("nan"),
+            "winding_max_abs": float("nan"),
+            "fraction_single_lap_cycles": 0.0,
             "per_cycle": [],
         }
 
@@ -235,6 +340,7 @@ def score_epoch_geometry(
     q_orth_norms = []
     q_orth_ratios = []
     n_samples_per = []
+    windings = []
 
     for k in range(K):
         idx = np.where(epochs.cycle_index == k)[0]
@@ -251,10 +357,12 @@ def score_epoch_geometry(
             if len(evr) < 3:
                 evr = np.concatenate([evr, np.zeros(3 - len(evr))])
             planarity_k = float(1.0 - evr[2])
+            winding_k, n_valid_trans, n_total_trans = _cycle_winding(X_k, center_k, pca)
         else:
             X_k = X_arr[idx] if n_k > 0 else np.empty((0, X_arr.shape[1]))
             center_k = X_k.mean(axis=0) if n_k > 0 else np.zeros(X_arr.shape[1])
             planarity_k = float("nan")
+            winding_k, n_valid_trans, n_total_trans = float("nan"), 0, max(0, n_k - 1)
 
         # Anchors (in the first 3 dimensions)
         c3 = center_k[:3] if len(center_k) >= 3 else np.pad(center_k, (0, 3 - len(center_k)))
@@ -275,11 +383,15 @@ def score_epoch_geometry(
             "anchor_norm": anchor_norm_k,
             "quarter_anchor_orth_norm": q_orth_norm,
             "quarter_anchor_orth_ratio": q_orth_ratio,
+            "winding": winding_k,
+            "winding_n_valid_transitions": n_valid_trans,
+            "winding_n_total_transitions": n_total_trans,
         })
         planarities.append(planarity_k)
         anchor_norms.append(anchor_norm_k)
         q_orth_norms.append(q_orth_norm)
         q_orth_ratios.append(q_orth_ratio)
+        windings.append(winding_k)
 
     def _nanmean(seq):
         arr = np.asarray(seq, dtype=float)
@@ -321,6 +433,22 @@ def score_epoch_geometry(
         float((tau[-1] - tau[0]) / total_duration) if total_duration > 0 else 0.0
     )
 
+    windings_abs = np.abs(np.asarray(windings, dtype=float))
+    if np.any(np.isfinite(windings_abs)):
+        winding_median_abs = float(np.nanmedian(windings_abs))
+        winding_min_abs = float(np.nanmin(windings_abs))
+        winding_max_abs = float(np.nanmax(windings_abs))
+    else:
+        winding_median_abs = float("nan")
+        winding_min_abs = float("nan")
+        winding_max_abs = float("nan")
+    # A winding-degenerate cycle (NaN) never counts as single-lap -- it's
+    # excluded from the *numerator* here but not the denominator, so a
+    # candidate cannot look more reliable than it is just by having more
+    # cycles whose winding couldn't be computed at all.
+    is_single_lap = (windings_abs >= winding_valid_min) & (windings_abs <= winding_valid_max)
+    fraction_single_lap_cycles = float(np.sum(is_single_lap)) / K
+
     return {
         "total_score": float(total),
         "planarity": planarity_mean,
@@ -331,6 +459,10 @@ def score_epoch_geometry(
         "n_cycles": K,
         "fraction_samples_assigned": fraction_samples_assigned,
         "coverage_duration_fraction": coverage_duration_fraction,
+        "winding_median_abs": winding_median_abs,
+        "winding_min_abs": winding_min_abs,
+        "winding_max_abs": winding_max_abs,
+        "fraction_single_lap_cycles": fraction_single_lap_cycles,
         "per_cycle": per_cycle,
     }
 
@@ -344,6 +476,10 @@ def find_epochs_by_geometric_score(
     columns: Optional[list] = None,
     weights: Optional[dict] = None,
     score_tolerance: float = 0.001,
+    winding_valid_min: float = DEFAULT_WINDING_VALID_MIN,
+    winding_valid_max: float = DEFAULT_WINDING_VALID_MAX,
+    winding_min_fraction: float = 0.8,
+    require_winding_valid: bool = True,
 ):
     """
     Search (period, offset) pairs for the epochs with the best geometric score.
@@ -366,9 +502,28 @@ def find_epochs_by_geometric_score(
     score_tolerance : float
         Candidate-*selection* tolerance, not a scoring change (see Notes).
         Absolute ``total_score`` tolerance below the best score achieved by
-        any candidate; among candidates within this tolerance of the best,
-        the one with the most complete cycles (``n_cycles``) wins, instead
-        of the single highest-scoring candidate outright.
+        any *winding-valid* candidate; among candidates within this
+        tolerance of the best, the one with the most complete cycles
+        (``n_cycles``) wins, instead of the single highest-scoring
+        candidate outright.
+    winding_valid_min, winding_valid_max : float
+        Range of ``abs(winding)`` (see :func:`score_epoch_geometry`) counted
+        as "approximately one lap" for a single cycle.
+    winding_min_fraction : float
+        A candidate is winding-valid if at least this fraction of *all* its
+        cycles (winding-degenerate cycles included, and never counted as
+        single-lap) have ``abs(winding)`` in
+        ``[winding_valid_min, winding_valid_max]``. Chosen to tolerate an
+        occasional noisy or degenerate cycle without being fooled by a
+        systematic period error, which shows up in every cycle, not just a
+        minority (see Notes).
+    require_winding_valid : bool
+        If ``True`` (default), only winding-valid candidates are eligible to
+        win (see Notes for how this composes with ``score_tolerance``). If
+        ``False``, the winding filter is skipped entirely and selection
+        falls back to plain ``score_tolerance``-based selection over all
+        scoreable candidates -- kept as an explicit opt-out for comparison,
+        not because the filter is optional in normal use.
 
     Returns
     -------
@@ -376,39 +531,75 @@ def find_epochs_by_geometric_score(
         The winning epochs, tagged with ``source="geometric_score"`` and
         with the winning period/offset in ``metadata``.
     candidate_table : pandas.DataFrame
-        One row per scored (period, offset) pair.  Columns: ``period,
-        offset, n_cycles, total_score, planarity,
-        quarter_anchor_orth_ratio, anchor_norm, fraction_samples_assigned,
-        min_samples_per_cycle, coverage_duration_fraction,
-        candidate_source``.  ``candidate_source`` is the originating
+        One row per scored (period, offset) pair -- including winding-invalid
+        ones, so rejected candidates stay inspectable rather than
+        disappearing from the report. Columns: ``period, offset, n_cycles,
+        total_score, planarity, quarter_anchor_orth_ratio, anchor_norm,
+        fraction_samples_assigned, min_samples_per_cycle,
+        coverage_duration_fraction, candidate_source, winding_median_abs,
+        winding_min_abs, winding_max_abs, fraction_single_lap_cycles,
+        winding_valid``.  ``candidate_source`` is the originating
         :class:`~phase_coordinates.period_search.PeriodCandidate`'s
         ``source`` (e.g. ``"periodogram"``, ``"autocorrelation"``,
         ``"harmonic:periodogram"``) — a diagnostic/reporting field, not
-        used in scoring.  The coverage columns are likewise report-only
-        and are not folded into ``total_score``.
+        used in scoring.  ``winding_valid`` is the accept/reject decision
+        actually used for selection (``fraction_single_lap_cycles >=
+        winding_min_fraction``); the coverage and winding columns are
+        otherwise report-only and are not folded into ``total_score``.
 
     Notes
     -----
-    An exact integer multiple of the true period retraces the same physical
-    loop multiple times per "cycle", which is geometrically indistinguishable
-    from the true period itself (same planarity, same anchor placement) —
-    so plain ``argmax(total_score)`` can pick a longer-period, fewer-cycle
-    candidate over the true period by an arbitrarily thin, essentially
-    arbitrary margin. This is a *selection* problem, not a defect in
-    ``total_score`` as a measure of geometric quality: restricting attention
-    to the near-tied top of the score distribution (``score_tolerance``,
-    absolute so it doesn't need special-casing a non-positive best score),
-    then preferring more cycles within that band, resolves the ambiguity
-    without turning geometric quality into a mixture of unrelated
-    objectives. A coarse coverage-first filter (e.g. "keep only candidates
-    within X of the maximum ``n_cycles``") was considered and rejected: an
-    unrelated short-period, low-quality candidate can trivially achieve a
-    very high ``n_cycles`` (dozens to hundreds, bounded only by
+    **The multi-lap / fractional-lap problem.** An exact integer multiple of
+    the true period retraces the same physical loop multiple times per
+    "cycle", which is geometrically indistinguishable from the true period
+    itself (same planarity, same anchor placement) — so plain
+    ``argmax(total_score)`` can pick a longer-period, fewer-cycle candidate
+    over the true period by an arbitrarily thin, essentially arbitrary
+    margin. A period that's a fraction of the true one has the complementary
+    problem: each proposed cycle only covers part of a revolution. Neither
+    is a defect in ``total_score`` as a measure of geometric quality
+    (planarity and anchor placement genuinely don't distinguish these cases)
+    — it's that nothing was checking whether a candidate cycle corresponds
+    to *one* traversal of the loop at all.
+
+    **Winding validity vs. score_tolerance: two separate questions.**
+    ``winding_valid``/``winding_min_fraction`` answer "does this candidate
+    represent approximately one traversal per cycle?" — a hard filter
+    applied *before* selection, at the same tier as the existing
+    ``epochs.n_cycles < 2`` exclusion. ``score_tolerance`` answers a
+    different question: "among valid, geometrically near-tied candidates,
+    how is the winner chosen?" It restricts attention to the near-tied top
+    of the score distribution among *winding-valid* candidates only, then
+    prefers more cycles within that band — resolving cases where two
+    winding-valid candidates (e.g. different genuine phase offsets) are
+    statistically tied on geometric quality. Both stay separate from
+    ``total_score`` itself: it keeps measuring geometric quality, not an
+    arbitrary mixture of unrelated objectives.
+
+    **Why winding validity is a fraction-of-cycles rule, not "every cycle"
+    or "any cycle".** Requiring *every* nondegenerate cycle to be in range
+    is fragile to a single noisy cycle rejecting an otherwise-correct
+    candidate. Requiring only *some* cycle to be in range would fail to
+    reject genuine period errors, since those are systematic — they show up
+    in every cycle of a candidate, not just one. A fraction threshold
+    (default ``0.8``) is tolerant of the former and still rejects the
+    latter: a true 2x/3x/0.5x period error produces a winding far from 1 in
+    essentially *all* cycles, so any reasonable non-trivial fraction
+    threshold catches it.
+
+    **Why a raw-coverage filter was rejected in favor of both of the above.**
+    A coarse coverage-first filter (e.g. "keep only candidates within X of
+    the maximum ``n_cycles``") was considered for the multi-lap problem and
+    rejected: an unrelated short-period, low-quality candidate can trivially
+    achieve a very high ``n_cycles`` (dozens to hundreds, bounded only by
     :mod:`period_search`'s ``min_period`` floor) while scoring far worse, so
     gating on coverage first can *discard* the correct candidate in favor of
-    a high-count spurious one. Gating on score first avoids that: any
-    candidate whose score is far from the best is excluded before coverage
-    is even considered.
+    a high-count spurious one. Winding validity targets the actual
+    geometric signature of the problem instead (does this candidate retrace
+    the same loop multiple times?), and ``score_tolerance`` gates on score
+    first among already-valid candidates, so neither is fooled by a
+    high-``n_cycles``, low-quality candidate the way a raw coverage filter
+    would be.
     """
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
@@ -419,7 +610,7 @@ def find_epochs_by_geometric_score(
     n_time = X_arr.shape[0]
 
     rows = []
-    scored_candidates = []  # (n_cycles, total_score, epochs, meta)
+    scored_candidates = []  # (n_cycles, total_score, epochs, meta, winding_valid)
 
     for cand in period_candidates:
         period = float(cand.period)
@@ -438,6 +629,7 @@ def find_epochs_by_geometric_score(
             try:
                 score = score_epoch_geometry(
                     X_arr, epochs, sampling_rate_hz=fs, columns=None, weights=weights,
+                    winding_valid_min=winding_valid_min, winding_valid_max=winding_valid_max,
                 )
             except ValueError:
                 # A degenerate candidate (typically a harmonic-halved period
@@ -450,6 +642,7 @@ def find_epochs_by_geometric_score(
                 # the whole search. This does not change total_score for
                 # any candidate that *can* be scored.
                 continue
+            winding_valid = score["fraction_single_lap_cycles"] >= winding_min_fraction
             rows.append({
                 "period": period,
                 "offset": float(offset),
@@ -462,6 +655,11 @@ def find_epochs_by_geometric_score(
                 "min_samples_per_cycle": score["min_samples_per_cycle"],
                 "coverage_duration_fraction": score["coverage_duration_fraction"],
                 "candidate_source": cand.source,
+                "winding_median_abs": score["winding_median_abs"],
+                "winding_min_abs": score["winding_min_abs"],
+                "winding_max_abs": score["winding_max_abs"],
+                "fraction_single_lap_cycles": score["fraction_single_lap_cycles"],
+                "winding_valid": winding_valid,
             })
             scored_candidates.append((
                 score["n_cycles"],
@@ -472,7 +670,9 @@ def find_epochs_by_geometric_score(
                     "offset": float(offset),
                     "total_score": score["total_score"],
                     "candidate_source": cand.source,
+                    "fraction_single_lap_cycles": score["fraction_single_lap_cycles"],
                 },
+                winding_valid,
             ))
 
     table = pd.DataFrame(
@@ -482,19 +682,42 @@ def find_epochs_by_geometric_score(
             "planarity", "quarter_anchor_orth_ratio", "anchor_norm",
             "fraction_samples_assigned", "min_samples_per_cycle",
             "coverage_duration_fraction", "candidate_source",
+            "winding_median_abs", "winding_min_abs", "winding_max_abs",
+            "fraction_single_lap_cycles", "winding_valid",
         ],
     )
 
+    if require_winding_valid:
+        candidate_pool = [c for c in scored_candidates if c[4]]
+    else:
+        candidate_pool = scored_candidates
+
     best_epochs: Optional[CycleEpochs] = None
     best_meta = None
-    if scored_candidates:
-        best_score = max(total_score for _, total_score, _, _ in scored_candidates)
+    if candidate_pool:
+        best_score = max(total_score for _, total_score, _, _, _ in candidate_pool)
         threshold = best_score - score_tolerance
-        qualified = [c for c in scored_candidates if c[1] >= threshold]
+        qualified = [c for c in candidate_pool if c[1] >= threshold]
         # qualified always contains at least the best-score candidate(s).
-        _, _, best_epochs, best_meta = max(qualified, key=lambda c: c[0])
+        _, _, best_epochs, best_meta, _ = max(qualified, key=lambda c: c[0])
 
     if best_epochs is None:
+        if scored_candidates:
+            # Candidates existed and were scoreable, but none passed the
+            # winding filter -- a different failure than "nothing scored at
+            # all" below, so it gets its own message pointing at the actual
+            # cause and the escape hatch.
+            raise ValueError(
+                "No (period, offset) candidate satisfied the winding "
+                f"validity filter (fraction_single_lap_cycles >= "
+                f"{winding_min_fraction} with abs(winding) in "
+                f"[{winding_valid_min}, {winding_valid_max}]). All scored "
+                "candidates appear to be multi-lap, fractional-lap, or too "
+                "degenerate to evaluate reliably. Pass "
+                "require_winding_valid=False to fall back to plain "
+                "geometric-quality selection, or adjust the winding "
+                "tolerance."
+            )
         raise ValueError(
             "No (period, offset) candidate produced at least 2 complete cycles. "
             "Provide more/longer data or different period candidates."
