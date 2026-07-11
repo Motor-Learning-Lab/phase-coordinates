@@ -2,6 +2,36 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Execution Planning
+
+Before starting a nontrivial task, read the whole request and form a complete plan before touching code. As part of that plan, identify every step that would need approval, elevated permissions, network access, is destructive, long-running, irreversible, or is a repository operation (push, merge, rebase, branch deletion, etc.).
+
+For each one: check whether it's actually necessary, and prefer a simpler approach that avoids it when that doesn't compromise the work — see "Working efficiently in this repo" below for concrete examples already found this way in this repo (direct pixi binaries, no `pixi run`; real pytest tests instead of ad hoc snippets). Separate genuinely risky/consequential actions from ones that merely happen to trigger a permission prompt. Actions already pre-authorized elsewhere in this file (e.g. commit/push after a round, below) don't need to be re-asked each time — this review is about *new or unreviewed* risk. For a step that is genuinely risky or consequential and not already pre-authorized: stop before implementing it, explain what will be done and why, state what permission is needed, describe alternatives considered, and wait for approval.
+
+If the plan changes mid-task in a way that introduces a new risky or consequential action, stop and repeat this review before continuing.
+
+## Design Principles
+
+Prefer simple, explicit, composable code over clever or hidden abstraction.
+
+**Explicit pipelines.** Prefer a visible sequence of transformations over a wrapper that hides several conceptual stages:
+
+```python
+phase = hilbert_phase(...)
+epochs = identify_cycles_from_phase(phase, ...)
+samples, cycles, details = fit_pca_phase_coordinates(X, epochs=epochs)
+```
+
+over a single function that estimates phase, identifies cycles, and fits coordinates internally. This mirrors the package's own phase-estimation / cycle-identification / coordinate-estimation / diagnostics split — don't collapse it back together.
+
+**Single responsibility.** Each function performs one clearly defined conceptual transformation. Avoid functions that combine several of: phase estimation, cycle identification, coordinate estimation, diagnostics, report formatting.
+
+**Shared representations.** Use well-defined shared structures (e.g. `CycleEpochs`) as the interface between stages, and validate their invariants early (at construction) so downstream code can rely on them without re-checking.
+
+**No package-level convenience wrappers for tests/demos.** Don't add a wrapper to the package just to shorten a test, example, or notebook. Put convenience helpers in the test file, demo script, or notebook that needs them.
+
+**Clean development architecture.** On development branches, prefer clear architecture over preserving historical APIs. Don't add compatibility wrappers without a concrete, current need; handle merge/release compatibility deliberately when that work actually comes up, not preemptively.
+
 ## Environment
 
 Dependencies are managed with **pixi**, resolved into `.pixi/envs/default` (shared across worktrees at the repo root: `../../../.pixi/envs/default` relative to a checkout under `.claude/worktrees/`). The system/bare `python`/`python3` have no project deps installed.
