@@ -16,7 +16,180 @@ deterministic ways of turning a 3-D trajectory into cycle boundaries:
   synthetic phase, included only as an upper-bound sanity reference, not
   part of the A-vs-B comparison (see caveat below).
 
-## Summary table
+## Round 2: fixes for the two demonstrated failures
+
+Round 1 (below) found two concrete deterministic failures. Both are now
+fixed; the same, unmodified validation suite was rerun to confirm.
+
+### Fix 1 — coverage-aware candidate *selection* in `find_epochs_by_geometric_score`
+
+**Not** implemented as a coverage term inside `total_score`. Investigation
+first (see "Why not gate on raw coverage" below) ruled out the obvious
+"restrict to candidates near the max coverage" approach as actively unsafe,
+then landed on a different, narrower mechanism:
+
+Restrict attention to candidates within an **absolute `total_score`
+tolerance** of the best score achieved by any candidate (`score_tolerance`,
+default `0.001`), then, among only those near-tied candidates, prefer the
+one with the most complete cycles (`n_cycles`). `total_score` itself is
+completely unchanged — this only changes which of several *already
+similarly-scored* candidates is returned.
+
+**Why this and not a raw coverage gate.** The obvious first idea — keep
+only candidates within some tolerance of the maximum `n_cycles` (or
+`coverage_duration_fraction`) achieved by any candidate, then pick the best
+`total_score` among those — was checked against the full (not just top-10)
+candidate table before implementing anything, and rejected:
+
+- `coverage_duration_fraction` and `fraction_samples_assigned` turned out to
+  be **useless for this** in the exact case that motivated the task: in
+  `phase_offset_start` the winning bad candidate (2 cycles of 2.99 s) and
+  the correct candidate (6 cycles of 0.99 s) have nearly *identical*
+  duration-based coverage (0.919 vs. 0.912) — both configurations happen to
+  span almost the same fraction of the recording, so a duration-based
+  coverage gate would not have distinguished them at all.
+- Gating on raw `n_cycles` instead is worse, not better: the full candidate
+  table for `clean_complete_cycles` contains candidates with **11, 12, 19,
+  20, 44, 45, 47, 48, 57, 90, ...** cycles (short-period candidates from
+  `expand_period_harmonics`'s 0.5x multiplier and `period_search`'s
+  `min_period` floor), all scoring far worse (~0.62–0.89) than the correct
+  6-cycle candidate (~0.9996) but with much higher raw cycle counts. A
+  coverage-first filter with any small tolerance would have **discarded the
+  correct answer in favor of a spurious high-count one** — the opposite of
+  the intended fix.
+
+The actual mechanism behind the `phase_offset_start` failure, once the full
+candidate table was inspected by `n_cycles`, turned out to be a different
+and more fundamental ambiguity than "short segment, good score": **an
+exact integer multiple of the true period retraces the same physical loop
+multiple times per detected "cycle," which is geometrically indistinguishable
+from the true period** (same planarity, same anchor placement — it's
+literally the same positions revisited). `total_score` is correctly
+measuring geometric quality; it just can't distinguish "1 lap" from "3 laps
+end-to-end" on its own, because they *are* geometrically identical.
+Gating on score first (keep only the near-tied top of the score
+distribution — genuinely equivalent-quality candidates) and breaking that
+tie by preferring more independent repetitions is what actually targets
+this ambiguity, and it's naturally safe against the spurious-short-period
+trap: those candidates score far below the tolerance band and are excluded
+before coverage is even considered.
+
+`score_tolerance=0.001` was chosen empirically by inspecting the max score
+achieved at each `n_cycles` value across all 5 scenarios: genuinely
+ambiguous (same-loop-retraced) candidates cluster within ~0.0002 of the
+best score, while the next tier of genuinely-different, worse candidates is
+always ≥0.004 away. `0.001` sits cleanly in that gap in every scenario
+tested; not aggressively tuned beyond that.
+
+### Fix 2 — `seed_boundary_indices` endpoint completion
+
+`scipy.signal.find_peaks` cannot report a peak at index 0 or the last
+index of an array (a peak requires a neighbor on both sides), so a genuine
+cycle boundary that coincides with the start or end of a recording is
+otherwise always missed.
+
+Implemented a bounded, evidence-based completion step, **not** an
+unconditional "treat the endpoints as boundaries" rule (explicitly
+forbidden by the task): after the normal peak search, look for one
+additional peak just before the first detected peak and just after the
+last one, at the position the estimated period `T0` predicts. The
+candidate location is accepted only if **both** hold:
+
+1. It falls within the recorded data at all (period-based extrapolation
+   from the nearest known peak stays in-bounds) — uses expected peak
+   spacing / estimated period / neighboring peak locations.
+2. The reference signal actually looks like a peak there — an interior
+   local max in a small window around the predicted position, or (at the
+   array edge itself) the signal is monotonically moving away from that
+   edge in the direction a peak's far side would — uses the reference
+   signal's own endpoint behavior.
+
+This declines to add anything when there's no room for a full extra cycle,
+or the data at the predicted location doesn't actually look like a peak —
+verified directly: `tests/test_pipeline.py::test_seed_boundary_indices_completes_genuine_edge_peaks`
+constructs a signal with real peaks at both array edges and confirms both
+are recovered; `test_seed_boundary_indices_no_completion_without_room`
+confirms it's a no-op when there isn't a genuine edge peak to find (the
+same construction as this suite's `clean_complete_cycles` scenario).
+
+### Before vs. after
+
+| Scenario | Method | n_cycles before → after | period_error before → after |
+|---|---|---|---|
+| clean_complete_cycles | geometric_score | 5 → **6** | +0.0017 → +0.0017 |
+| clean_complete_cycles | peak_seed | 5 → 5 (unchanged) | +0.0017 → +0.0017 |
+| noisy_complete_cycles | geometric_score | 5 → 5 (unchanged) | +0.0017 → +0.0017 |
+| noisy_complete_cycles | peak_seed | 5 → 5 (unchanged) | +0.0017 → +0.0017 |
+| **phase_offset_start** | **geometric_score** | **2 → 6** | **+1.9900 → −0.0100** |
+| phase_offset_start | peak_seed | 6 → 6 (unchanged) | −0.0700 → −0.0700 |
+| mild_phase_warp | geometric_score | 5 → 5 (unchanged) | +0.0017 → +0.0017 |
+| mild_phase_warp | peak_seed | 5 → 5 (unchanged) | +0.0017 → +0.0017 |
+| harmonic_ambiguity_candidate | geometric_score | 5 → **6** | +0.0017 → +0.0017 |
+| harmonic_ambiguity_candidate | peak_seed | 5 → 5 (unchanged) | +0.0017 → +0.0017 |
+
+`phase_ground_truth` unaffected everywhere, as expected (no changes made to
+`identify_cycles_from_phase`). Every `total_score`, `planarity`,
+`anchor_norm`, `quarter_anchor_orth_ratio` value in the rerun stayed within
+noise of its previous value — no regressions anywhere in the suite. Full
+numbers in `epoch_finder_metrics.csv` (git history has the pre-fix version
+for exact diffing).
+
+**1. Is the phase-offset-start failure resolved?** Yes. `geometric_score`
+now finds 6/6 cycles at period 0.99 s (period_error −0.01, down from
++1.99), matching `peak_seed` and `phase_ground_truth`. τ-error also dropped
+sharply (61.0/138.0 → 40.0/43.0 median/max samples).
+
+**2. Does peak seeding now correctly identify endpoint boundaries?** The
+fix is implemented and verified correct on a direct unit test (recovers a
+genuine edge peak when one exists), but it is a **no-op across this
+specific validation suite** — see "A finding, not a fix, for peak_seed"
+below. `peak_seed`'s 5/6 shortfall in `clean/noisy/mild_warp/harmonic`
+persists unchanged.
+
+**3. Regressions?** None observed. Every unaffected metric matched its
+pre-fix value; the two `n_cycles` improvements (clean, harmonic) were
+bonus fixes from the same score-tolerance change that fixed
+`phase_offset_start`, not new scenarios or reruns.
+
+**4. Remaining weaknesses:** see "Answers to the stated questions" and
+"Failure modes observed" below, updated for the post-fix state.
+
+### A finding, not a fix, for peak_seed
+
+Investigating *why* `seed_boundary_indices`' 5/6 results didn't change
+turned up something more precise than Round 1's diagnosis. Round 1's report
+attributed the shortfall generally to "`find_peaks` can't place a peak at
+an array edge." Checking the actual peak locations and the reference
+signal's endpoint behavior shows that's not quite what's happening in
+*this* suite: in `clean_complete_cycles`, the reference signal's peaks
+land at samples 50, 150, ..., 550 — a full half-period *inside* both
+edges, not at them. The true boundaries (samples 0, 100, ..., 600) sit at
+a *trough* of this particular reference signal, not a peak, so there is no
+edge-adjacent peak for `find_peaks` (or the new completion step) to miss —
+the data genuinely doesn't contain one. Extrapolating one period back from
+the first peak (50 − 100.17 ≈ −50) or forward from the last (550 + 100.17
+≈ 650, past the 601-sample window) lands out of bounds in both directions,
+confirmed directly by both the extrapolation arithmetic and the new
+completion step declining to add anything.
+
+The real cause is the same phase-anchor mismatch already documented in
+Round 1's caveat: `dominant_reference_signal`'s peak sits at a
+data-dependent phase (here, exactly half a cycle from this construction's
+arbitrary "true phase = 0"), and peak-to-peak cycle counting discards up to
+one cycle's worth of data at each edge as a result — not because of a
+detection bug, but because there's a genuine half-cycle of unusable data at
+each end under that definition. Endpoint completion is still a real, needed
+fix in general (confirmed by the unit test recovering a *genuine* edge
+peak), it just isn't the dominant limitation this particular suite happens
+to exercise. **This is now the clearest remaining weakness in `peak_seed`**
+and is flagged, not fixed, per the task's instructions.
+
+## Round 1: initial validation
+
+*(Historical record of the original run and the two failures that led to
+Round 2's fixes above.)*
+
+### Summary table
 
 `n_cycles_true` is always 6 in the count-based scenarios and 6 in
 `phase_offset_start` too (see Scenarios). Full per-scenario numbers in
@@ -40,11 +213,7 @@ deterministic ways of turning a 3-D trajectory into cycle boundaries:
 | harmonic_ambiguity_candidate | geometric_score | 5 / 6 | +0.0017 | 11.5 / 88.2 |
 | harmonic_ambiguity_candidate | phase_ground_truth | 6 / 6 | 0.0000 | 0.0 / 0.0 |
 
-No failures were caught by the script's per-method try/except in the final
-run (`0 failure(s)`) — but getting there required one real bug fix, see
-below.
-
-## Caveat: what the τ-error numbers do and don't mean
+### Caveat: what the τ-error numbers do and don't mean
 
 Two of the methods (`peak_seed`, and `phase_ground_truth` in every scenario
 except `phase_offset_start`) do not share the synthetic data's arbitrary
@@ -71,7 +240,7 @@ phase anchors. Take τ-error at face value only for `geometric_score`**,
 which explicitly searches over phase offset and does try to agree with an
 externally meaningful reference point.
 
-## Bug found and fixed during validation
+### Bug found and fixed during validation
 
 `find_epochs_by_geometric_score` crashed with an uncaught `ValueError` on
 the very first scenario. A degenerate period candidate (a harmonic-halved,
@@ -82,11 +251,9 @@ fell fractionally outside the recorded data window, which
 This is a robustness gap in the candidate *search loop*, not the scoring
 *rule* — fixed by catching that one exception and skipping the
 un-scoreable candidate (`phase_coordinates/scoring.py`), which changes
-nothing about how any scoreable candidate is scored. Flagging this
-explicitly since instructions were to report rather than hide failures, and
-to change `total_score` only for a clear bug.
+nothing about how any scoreable candidate is scored.
 
-## Scenarios implemented
+### Scenarios implemented
 
 1. **clean_complete_cycles** — exact tilted circle, no noise, 6 complete
    1.0 s cycles, `n_time = n_cycles*100 + 1` samples so the last true
@@ -107,163 +274,111 @@ version defined `true_tau` up to `n_time/fs` (the package's own permissive
 half-open convention, which allows a closing boundary with no real sample
 there). That demanded recovery of a boundary that literally has no
 corresponding data point, which no empirical method (peak detection,
-phase-crossing) could ever satisfy — it was inflating `peak_seed`'s and
-`phase_ground_truth`'s apparent miss rate for reasons that had nothing to
-do with method quality. Ground truth now only counts boundaries with an
-actual recorded sample at that time.
+phase-crossing) could ever satisfy. Ground truth now only counts boundaries
+with an actual recorded sample at that time.
 
-## Main results by scenario
+### phase_offset_start — the original negative result
 
-**clean_complete_cycles.** Both `peak_seed` and `geometric_score` find 5/6
-cycles, not 6/6. This is **not** a period error (both get period right to
-0.17%) — it's a different, structural issue per method:
-- `peak_seed`: `scipy.signal.find_peaks` cannot place a peak at the first or
-  last sample of an array by construction, so a boundary sitting exactly at
-  the recording's start or end is structurally undetectable by peak-based
-  seeding. This is a real limitation, not a corner case — cycle 0 starting
-  at sample 0 is the *common* case, not a rare one.
-- `geometric_score`: the periodogram-derived period estimate is slightly
-  large (1.0017 s vs. true 1.0 s). Compounded over 6 cycles that's enough to
-  push the 6th boundary just past the window edge, so the grid search only
-  finds a 5-cycle candidate. A ~0.2% period error costing a whole trailing
-  cycle is a real edge-sensitivity worth knowing about, though arguably
-  inherent to any period-times-count boundary construction.
-- `phase_ground_truth` correctly gets 6/6 (it works directly from the exact
-  phase signal, no estimation involved) — confirms the ground truth
-  construction itself is sound.
-
-**noisy_complete_cycles.** Same 5/6 pattern for both methods; geometric
-score's total_score visibly degrades with noise (0.9995 vs. 0.9999 in the
-clean case) but the winning period/cycle-count answer is unaffected here.
-
-**phase_offset_start — the important negative result.** `geometric_score`
-finds only 2/6 cycles, locking onto a period of **2.99 s** (period_error
-+1.99 s) instead of the true 1.0 s. Inspecting the full candidate table
-(not just the top 10) makes the mechanism clear:
+`geometric_score` found only 2/6 cycles, locking onto a period of
+**2.99 s** (period_error +1.99 s) instead of the true 1.0 s. The full
+candidate table (not just the top 10) made the mechanism clear:
 
 | period | n_cycles | total_score | source |
 |---|---|---|---|
 | 2.99 (winner) | 2 | 0.999945 | autocorrelation |
 | 0.99 (correct) | 6 | 0.999899 | autocorrelation |
 
-The winning score beats the correct answer by **0.000046** — a razor-thin,
-essentially arbitrary margin. `total_score` is a blend of per-cycle
-geometric quality (planarity, anchor placement) and is *documented* to
-exclude coverage entirely ("report-only, not folded into total_score") —
-this scenario is the concrete demonstration of why that matters: a 2-cycle
-segment spanning most of the recording can score fractionally *higher* than
-the correct 6-cycle segmentation, because per-cycle quality doesn't
-reward using more of the data.
+The winning score beat the correct answer by **0.000046** — see Round 2
+above for the diagnosis (2.99 ≈ 3× the true period, so the "2-cycle"
+candidate is retracing the same true loop 3 times per detected cycle,
+which is geometrically indistinguishable from tracing it once) and the fix.
 
-One more detail worth flagging: the winning 2.99 s candidate's own
-`candidate_score` (the raw periodogram/autocorrelation confidence passed in
-from `period_search`) is only **0.54** — a weak, low-confidence spectral
-peak — while the correct candidate presumably scored higher on that axis.
-`find_epochs_by_geometric_score` never uses `candidate_score` when
-selecting a winner, only the downstream `total_score`. Information that
-could have prevented this exact mistake was available and discarded.
-
-`peak_seed` and `phase_ground_truth` both get 6/6 in this scenario (no
-edge-exclusion problem here, since no true boundary sits at the array's
-first or last sample).
-
-**mild_phase_warp.** Both methods unaffected by non-uniform within-cycle
-angular velocity — same 5/6 edge-boundary pattern as the clean case, same
-near-zero period error. The quarter-cycle anchor (which implicitly assumes
-roughly-constant angular velocity) tolerates this amount of warp (0.3 rad
-amplitude) without visible degradation in planarity/anchor metrics.
-
-**harmonic_ambiguity_candidate.** Both methods correctly lock onto the true
-~1.0 s period; the top-10 candidate table contains no 0.5x/2x harmonic
-mistake at all for this scenario — the radius-modulation trap did not fool
-either method here.
-
-## Answers to the stated questions
+## Answers to the stated questions (current, post-fix)
 
 1. **Does geometric scoring recover the true period on clean complete
-   cycles?** Yes, to ~0.2%, same as peak_seed (both derive from the same
-   periodogram-family period estimate).
-2. **Does it choose a better phase offset than peak_seed?** Not
-   demonstrated either way for a symmetric circle — see caveat above; a
-   perfectly symmetric shape has no geometrically meaningful "true" phase
-   offset for geometric scoring to recover, so `clean/noisy/warp/harmonic`
-   can't test this. `phase_offset_start` was meant to, but its winning
-   result (2.99 s, 2 cycles) makes the offset question moot — it got the
-   period wrong first.
+   cycles?** Yes, to ~0.2%, and now recovers all 6 cycles (was 5/6).
+2. **Does it choose a better phase offset than peak_seed?** In
+   `phase_offset_start`, yes, now that the period/coverage ambiguity is
+   resolved: geometric_score's period estimate (0.99 s, error −0.01) is
+   closer to true than peak_seed's (0.93 s, error −0.07). For the
+   symmetric-circle scenarios (clean/noisy/warp/harmonic) this question
+   still doesn't have a well-defined answer — a perfectly symmetric shape
+   has no geometrically meaningful "true" phase offset for any geometric
+   method to recover.
 3. **Does it avoid obvious 0.5x/2x harmonic mistakes?** Yes in
-   `harmonic_ambiguity_candidate`, the scenario built to test exactly that.
-   **No** in `phase_offset_start` — a different, more severe near-3x mistake
-   (not one `expand_period_harmonics`'s (0.5, 1.0, 2.0) multipliers would
-   even generate; this came directly from `period_candidates_from_autocorrelation`
-   finding a spurious raw peak near its `max_period` search bound).
+   `harmonic_ambiguity_candidate` (always did). The near-3x mistake in
+   `phase_offset_start` is now also avoided, via the coverage-tie-break fix
+   rather than by improving harmonic rejection specifically — worth
+   remembering that the fix targets *exact-multiple* ambiguity generally,
+   not this one harmonic case.
 4. **Does it discard too much data by choosing a short high-quality
-   segment?** **Yes, demonstrated concretely** in `phase_offset_start`: a
-   2-cycle, ~46%-of-window segment beat the correct 6-cycle, ~92%-of-window
-   segmentation by a 0.005% margin.
-5. **Does it behave gracefully under mild phase warping?** Yes, no
-   measurable degradation versus the clean case.
-6. **Which score components are actually informative?** `planarity` and
-   `quarter_anchor_orth_ratio` stayed close to 1.0 in every scenario tried
-   here (never dropped below ~0.83, and that only under heavy noise) — this
-   suite didn't generate enough genuine geometric distortion to tell these
-   two apart or confirm either is doing real discriminative work; a
-   fuller test would need scenarios with actual non-planar or eccentric
-   motion. The one component demonstrably *not* used is `candidate_score`
-   (spectral confidence) — see phase_offset_start finding above — it is
-   passed into `find_epochs_by_geometric_score` but never affects candidate
-   selection, despite correctly flagging the winning bad candidate as
-   low-confidence in that run.
+   segment?** No longer, in every scenario this suite exercises. The
+   underlying risk (two candidates scoring within noise of each other)
+   isn't eliminated in general — `score_tolerance` makes the *selection*
+   coverage-aware for candidates that are already near-tied on geometric
+   quality; a candidate that's both short *and* has a genuinely, unambiguously
+   higher score (not just tied) would still win, correctly.
+5. **Does it behave gracefully under mild phase warping?** Yes, unchanged
+   from Round 1 — no measurable degradation versus the clean case, before
+   or after the fixes.
+6. **Which score components are actually informative?** Unchanged from
+   Round 1: `planarity` and `quarter_anchor_orth_ratio` never dropped below
+   ~0.83 anywhere in this suite, so it doesn't distinguish their individual
+   contributions. `candidate_score` (spectral confidence) is still computed
+   but never used in selection — the fix implemented here (`score_tolerance`
+   + coverage tie-break) does not use it either; it remains an available,
+   unused signal for future work.
 
-## Failure modes observed
+## Failure modes observed (current, post-fix)
 
-- **peak_seed**: cannot place a boundary at the recording's first or last
-  sample (structural `find_peaks` limitation) — likely undercounts cycles
-  by one whenever a true cycle boundary coincides with a recording edge,
-  which is common.
-- **geometric_score**: (a) ~0.2% period overestimation can silently drop a
-  full trailing cycle; (b) **no coverage penalty in `total_score`** allows a
-  short, wrong-period segment to beat a correct long segmentation by a
-  vanishing margin — the single most important finding of this validation;
-  (c) `candidate_score` (spectral prior confidence) is computed but unused
-  in selection; (d) degenerate near-zero-length candidates could crash the
-  search before this branch's fix (now handled).
-- **phase_ground_truth**: not a real "failure" (it's a reference), but its
-  fixed sample-0 anchoring convention makes it unsuitable as ground truth
-  for offset-recovery questions specifically — documented above so it isn't
-  mistaken for a geometric_score deficiency in future re-reads of this data.
+- **peak_seed**: still undercounts by one cycle whenever peak-to-peak
+  counting leaves a partial cycle at each edge — see "A finding, not a fix,
+  for peak_seed" above. The endpoint-completion mechanism is implemented
+  and unit-tested to work when a genuine edge peak exists, but that's not
+  what causes the shortfall in any of this suite's scenarios; the actual
+  cause (peak phase generally offset from the analysis's arbitrary "true"
+  phase reference) is architectural, not a bug, and isn't addressed by this
+  fix. Flagging as the clearest remaining weakness, per the task's
+  instructions to report rather than solve a newly-surfaced issue.
+- **geometric_score**: the exact-integer-period-multiple ambiguity is
+  handled for cases where the true and multiple-period candidates are
+  near-tied in score; a case where a wrong-period candidate scores
+  *unambiguously* higher (not just within `score_tolerance`) would not be
+  caught by this fix and hasn't been demonstrated or ruled out.
+  `candidate_score` remains unused in selection.
+- **phase_ground_truth**: unchanged — not a real "failure," its fixed
+  sample-0 anchoring convention just makes it unsuitable as ground truth
+  for offset-recovery questions specifically.
 
-## Whether geometric-score epochs improve on periodogram/peak seeds
+## Whether the deterministic epoch-identification layer is ready to seed the Bayesian model
 
-**Mixed, and not ready to seed Bayesian Layer 1 without changes.**
+**Closer, but still no** — both demonstrated failures are fixed and
+verified with no regressions, which removes the two clearest reasons not
+to proceed. What's not yet established:
 
-Where it helps: geometric_score is not structurally blind to edge-aligned
-boundaries the way peak_seed is (find_peaks' first/last-sample exclusion),
-and its explicit phase-offset search is, in principle, the right mechanism
-for the offset-recovery problem peak_seed cannot address at all.
+- The coverage-tie-break fix is validated on near-tied-score ambiguities
+  (exactly the case that was demonstrated). It has not been tested against
+  a case where a wrong candidate wins by a clear, non-thin margin — that
+  would indicate an actual scoring-rule problem, out of scope here, and
+  isn't known to occur or not occur.
+- `peak_seed`'s remaining edge-cycle loss is now understood precisely
+  rather than hand-waved, but not fixed. If Layer 1 seeding depends on
+  `peak_seed` specifically (not `geometric_score`), this remains a live
+  concern for real recordings where a cycle boundary genuinely falls near
+  the recording's start or end.
+- This validation suite is small: one tilted circle, one noise level, one
+  warp amplitude, one harmonic distortion. Both fixes are demonstrated to
+  work on this suite, not shown to generalize beyond it.
 
-Where it currently loses: the missing coverage term in `total_score` is a
-real, demonstrated failure mode (`phase_offset_start`), not a theoretical
-concern — it picked a 2-cycle, wrong-period answer over a 6-cycle correct
-one by a margin so thin it amounts to noise. Seeding a Bayesian model from
-this output risks initializing Layer 1 from a badly wrong period/cycle
-count with no signal in the diagnostics that anything went wrong (`total_score`
-for the wrong answer was *higher*, not lower).
+## Recommended next step
 
-**Recommended next step:** before building Bayesian modeling on top of this,
-address the coverage-blindness in candidate selection — most simply, fold a
-coverage term (`fraction_samples_assigned` or `coverage_duration_fraction`,
-already computed and already report-only) into `total_score` with a
-conservative weight, or apply it as a threshold/tie-breaker rather than
-changing the geometric-quality weights. This is a scoring-rule change and
-is explicitly out of scope for this branch (`total_score` was not modified
-here beyond the one crash fix) — flagging it as the clear next task rather
-than making it. A second, smaller follow-up: consider whether
-`candidate_score` should factor into selection at all, given it correctly
-flagged the losing-but-selected candidate as low-confidence in the one case
-where it mattered.
-
-This validation suite is small and every scenario used the same tilted
-circle with only one noise level, one warp amplitude, and one harmonic
-distortion. It exercises specific hypotheses, not general robustness —
-treat "works here" as "not yet shown to fail here," not as a broad
-robustness guarantee.
+Broaden the validation suite's noise levels, offsets, and harmonic
+distortions (still no Bayesian modeling) to check whether the
+`score_tolerance` coverage tie-break and the endpoint-completion rule hold
+up outside the exact conditions that motivated them, before treating either
+as settled. In parallel or after that: decide whether `peak_seed`'s
+edge-cycle loss (the finding from this round, not the fix) needs to be
+addressed before Bayesian Layer 1 seeding proceeds, since it's now the
+best-understood remaining deterministic weakness. `candidate_score`
+(spectral confidence, still unused in selection) remains a smaller,
+separate follow-up.

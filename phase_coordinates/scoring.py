@@ -343,6 +343,7 @@ def find_epochs_by_geometric_score(
     n_phase_offsets: int = 64,
     columns: Optional[list] = None,
     weights: Optional[dict] = None,
+    score_tolerance: float = 0.001,
 ):
     """
     Search (period, offset) pairs for the epochs with the best geometric score.
@@ -362,6 +363,12 @@ def find_epochs_by_geometric_score(
         Subset of columns to use when ``X`` is a DataFrame.
     weights : dict, optional
         Weight overrides for :func:`score_epoch_geometry`.
+    score_tolerance : float
+        Candidate-*selection* tolerance, not a scoring change (see Notes).
+        Absolute ``total_score`` tolerance below the best score achieved by
+        any candidate; among candidates within this tolerance of the best,
+        the one with the most complete cycles (``n_cycles``) wins, instead
+        of the single highest-scoring candidate outright.
 
     Returns
     -------
@@ -379,6 +386,29 @@ def find_epochs_by_geometric_score(
         ``"harmonic:periodogram"``) — a diagnostic/reporting field, not
         used in scoring.  The coverage columns are likewise report-only
         and are not folded into ``total_score``.
+
+    Notes
+    -----
+    An exact integer multiple of the true period retraces the same physical
+    loop multiple times per "cycle", which is geometrically indistinguishable
+    from the true period itself (same planarity, same anchor placement) —
+    so plain ``argmax(total_score)`` can pick a longer-period, fewer-cycle
+    candidate over the true period by an arbitrarily thin, essentially
+    arbitrary margin. This is a *selection* problem, not a defect in
+    ``total_score`` as a measure of geometric quality: restricting attention
+    to the near-tied top of the score distribution (``score_tolerance``,
+    absolute so it doesn't need special-casing a non-positive best score),
+    then preferring more cycles within that band, resolves the ambiguity
+    without turning geometric quality into a mixture of unrelated
+    objectives. A coarse coverage-first filter (e.g. "keep only candidates
+    within X of the maximum ``n_cycles``") was considered and rejected: an
+    unrelated short-period, low-quality candidate can trivially achieve a
+    very high ``n_cycles`` (dozens to hundreds, bounded only by
+    :mod:`period_search`'s ``min_period`` floor) while scoring far worse, so
+    gating on coverage first can *discard* the correct candidate in favor of
+    a high-count spurious one. Gating on score first avoids that: any
+    candidate whose score is far from the best is excluded before coverage
+    is even considered.
     """
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
@@ -389,9 +419,7 @@ def find_epochs_by_geometric_score(
     n_time = X_arr.shape[0]
 
     rows = []
-    best_score = float("-inf")
-    best_epochs: Optional[CycleEpochs] = None
-    best_meta = None
+    scored_candidates = []  # (n_cycles, total_score, epochs, meta)
 
     for cand in period_candidates:
         period = float(cand.period)
@@ -435,15 +463,17 @@ def find_epochs_by_geometric_score(
                 "coverage_duration_fraction": score["coverage_duration_fraction"],
                 "candidate_source": cand.source,
             })
-            if score["total_score"] > best_score:
-                best_score = score["total_score"]
-                best_epochs = epochs
-                best_meta = {
+            scored_candidates.append((
+                score["n_cycles"],
+                score["total_score"],
+                epochs,
+                {
                     "period": period,
                     "offset": float(offset),
                     "total_score": score["total_score"],
                     "candidate_source": cand.source,
-                }
+                },
+            ))
 
     table = pd.DataFrame(
         rows,
@@ -454,6 +484,15 @@ def find_epochs_by_geometric_score(
             "coverage_duration_fraction", "candidate_source",
         ],
     )
+
+    best_epochs: Optional[CycleEpochs] = None
+    best_meta = None
+    if scored_candidates:
+        best_score = max(total_score for _, total_score, _, _ in scored_candidates)
+        threshold = best_score - score_tolerance
+        qualified = [c for c in scored_candidates if c[1] >= threshold]
+        # qualified always contains at least the best-score candidate(s).
+        _, _, best_epochs, best_meta = max(qualified, key=lambda c: c[0])
 
     if best_epochs is None:
         raise ValueError(

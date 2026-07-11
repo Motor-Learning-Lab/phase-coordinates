@@ -405,3 +405,94 @@ def test_cycle_epochs_allows_all_unassigned_cycle_index():
         source="test",
     )
     assert epochs.n_cycles == 0
+
+
+# ---------------------------------------------------------------------------
+# 14. seed_boundary_indices endpoint completion
+# ---------------------------------------------------------------------------
+
+def test_seed_boundary_indices_completes_genuine_edge_peaks():
+    """When a real peak sits exactly at sample 0 and/or the last sample,
+    find_peaks alone cannot report it (no neighbor on one side); the
+    completion step should recover both using the estimated period."""
+    fs = 100.0
+    T0 = 1.0
+    n = 601  # samples 0..600 -> peaks of cos at 0,100,...,600 (6 full cycles)
+    t = np.arange(n) / fs
+    ref = np.cos(2 * np.pi * t / T0)
+
+    tau_idx = seed_boundary_indices(ref, fs, T0)
+
+    assert tau_idx[0] == 0
+    assert tau_idx[-1] == 600
+    np.testing.assert_array_equal(tau_idx, [0, 100, 200, 300, 400, 500, 600])
+
+
+def test_seed_boundary_indices_no_completion_without_room():
+    """No completion should be added when there isn't a full extra cycle's
+    worth of room, or the edge doesn't actually look like a peak -- this
+    guards against the endpoint fix "simply forcing" a boundary."""
+    fs = 100.0
+    T0 = 1.0
+    n = 601
+    t = np.arange(n) / fs
+    # Peaks at phase=pi (offset from t=0), same construction as the
+    # validation suite's clean_complete_cycles scenario: neither array edge
+    # has room for one more full cycle, so completion must be a no-op.
+    ref = np.cos(2 * np.pi * t / T0 + np.pi)
+
+    tau_idx = seed_boundary_indices(ref, fs, T0)
+
+    assert tau_idx[0] not in (0,)
+    assert tau_idx[-1] not in (n - 1,)
+    np.testing.assert_array_equal(tau_idx, [50, 150, 250, 350, 450, 550])
+
+
+# ---------------------------------------------------------------------------
+# 15. find_epochs_by_geometric_score coverage-aware selection
+# ---------------------------------------------------------------------------
+
+def test_find_epochs_by_geometric_score_prefers_more_cycles_when_tied():
+    """An exact integer multiple of the true period retraces the same loop
+    and can score just as well as the true period -- selection should
+    prefer the higher-coverage (more-cycles) candidate among near-tied
+    scores, not the first/highest-scoring one regardless of coverage."""
+    fs = 100.0
+    period = 1.0
+    offset = 0.37
+    n_time = 651  # 6 true 1.0 s cycles starting at offset 0.37 s
+    t = np.arange(n_time) / fs
+    tilt = np.pi / 6
+    phase = 2 * np.pi * (t - offset) / period
+    X = np.column_stack([
+        np.cos(phase), np.sin(phase) * np.cos(tilt), np.sin(phase) * np.sin(tilt),
+    ])
+    X += np.random.default_rng(1).standard_normal(X.shape) * 0.01
+
+    ref = dominant_reference_signal(X)
+    c1 = period_candidates_from_periodogram(ref, fs)
+    c2 = period_candidates_from_autocorrelation(ref, fs)
+    epochs, table = find_epochs_by_geometric_score(X, fs, period_candidates=c1 + c2)
+
+    assert epochs.n_cycles >= 5, (
+        f"expected the ~6-cycle true-period candidate to win, got "
+        f"n_cycles={epochs.n_cycles}, period={epochs.metadata.get('period')}"
+    )
+    assert abs(float(epochs.metadata["period"]) - period) < 0.1
+
+
+def test_find_epochs_by_geometric_score_selection_tolerance_is_absolute():
+    """score_tolerance=0 falls back to plain argmax(total_score) (the
+    pre-fix behavior) -- confirms the new parameter actually changes
+    selection rather than being a no-op."""
+    X, phase, fs = _tilted_circle(n_cycles=4, samples_per_cycle=100, noise_std=0.01)
+    ref = dominant_reference_signal(X)
+    cands = period_candidates_from_periodogram(ref, fs, n_candidates=5)
+    epochs_strict, _ = find_epochs_by_geometric_score(
+        X, fs, period_candidates=cands, n_phase_offsets=16, score_tolerance=0.0,
+    )
+    epochs_tolerant, _ = find_epochs_by_geometric_score(
+        X, fs, period_candidates=cands, n_phase_offsets=16, score_tolerance=0.001,
+    )
+    # Coverage-aware selection can only match or beat plain argmax on cycle count.
+    assert epochs_tolerant.n_cycles >= epochs_strict.n_cycles

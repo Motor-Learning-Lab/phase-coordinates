@@ -125,10 +125,80 @@ def estimate_dominant_period(ref_signal, fs):
     return 1.0 / f0
 
 
+def _is_local_max_or_consistent_edge(ref_signal, idx):
+    """
+    True if ``ref_signal[idx]`` is a genuine interior local max, or ``idx``
+    is an array edge (0 or last index) and the signal moves *away* from it
+    in the direction expected of a peak whose other side simply isn't
+    recorded (i.e. it's falling immediately after index 0, or rising
+    immediately before the last index).
+    """
+    n = len(ref_signal)
+    if idx <= 0:
+        return n > 1 and ref_signal[0] >= ref_signal[1]
+    if idx >= n - 1:
+        return n > 1 and ref_signal[n - 1] >= ref_signal[n - 2]
+    return ref_signal[idx] >= ref_signal[idx - 1] and ref_signal[idx] >= ref_signal[idx + 1]
+
+
+def _complete_endpoint_peak(ref_signal, peaks, fs, T0, *, side, tolerance_frac=0.15):
+    """
+    Look for one additional peak just before the first detected peak
+    (``side="start"``) or just after the last one (``side="end"``), using
+    the estimated period to predict roughly where it should be.
+
+    This does *not* force sample 0 / the last sample to be a boundary --
+    ``find_peaks`` cannot report a peak at either array edge (it requires a
+    neighbor on both sides), so a genuine edge-adjacent peak is otherwise
+    always missed. The predicted location is only accepted if (a) it falls
+    within the recorded data at all, and (b) the reference signal actually
+    looks like a peak there (an interior local max, or a consistent
+    monotonic approach/departure at the array edge) -- both are information
+    already available (expected spacing from ``T0``, neighboring peak
+    locations, and the reference signal's own endpoint behavior), not an
+    unconditional assumption that a boundary belongs there.
+    """
+    n = len(ref_signal)
+    period_samples = T0 * fs
+    search_radius = max(1, int(round(tolerance_frac * period_samples)))
+
+    if side == "start":
+        expected = peaks[0] - period_samples
+        if expected < 0:
+            return None
+        lo = 0
+        hi = min(peaks[0], int(round(expected + search_radius)) + 1)
+    else:
+        expected = peaks[-1] + period_samples
+        if expected > n - 1:
+            return None
+        lo = max(peaks[-1] + 1, int(round(expected - search_radius)))
+        hi = n
+
+    if hi <= lo:
+        return None
+
+    window = ref_signal[lo:hi]
+    candidate_idx = lo + int(np.argmax(window))
+    if _is_local_max_or_consistent_edge(ref_signal, candidate_idx):
+        return candidate_idx
+    return None
+
+
 def seed_boundary_indices(ref_signal, fs, T0):
     """
     Detect candidate cycle-boundary sample indices as positive peaks of a
     reference signal, spaced at roughly the dominant period.
+
+    ``scipy.signal.find_peaks`` can never report a peak at index 0 or the
+    last index (a peak requires a neighbor on both sides), so a genuine
+    cycle boundary that coincides with the start or end of the recording is
+    otherwise silently lost. After the initial peak search, this makes one
+    bounded attempt on each side to complete such an edge peak using the
+    estimated period and the reference signal's own local shape (see
+    :func:`_complete_endpoint_peak`); it adds nothing if there isn't room
+    for a full extra cycle or the data at that location doesn't actually
+    look like a peak.
 
     Returns integer sample indices ``tau_idx`` (length ``K``), defining
     ``K - 1`` candidate cycles.
@@ -140,7 +210,16 @@ def seed_boundary_indices(ref_signal, fs, T0):
             "Could not detect at least 3 boundary events (>= 2 complete "
             "cycles) from the data. Provide a longer / cleaner recording."
         )
-    return peaks.astype(int)
+
+    peaks = list(peaks)
+    extra_start = _complete_endpoint_peak(ref_signal, peaks, fs, T0, side="start")
+    if extra_start is not None:
+        peaks.insert(0, extra_start)
+    extra_end = _complete_endpoint_peak(ref_signal, peaks, fs, T0, side="end")
+    if extra_end is not None:
+        peaks.append(extra_end)
+
+    return np.array(sorted(set(peaks)), dtype=int)
 
 
 def seed_cycle_centers(X, tau_idx):
