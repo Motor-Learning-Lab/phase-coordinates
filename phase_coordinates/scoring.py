@@ -372,8 +372,13 @@ def find_epochs_by_geometric_score(
         One row per scored (period, offset) pair.  Columns: ``period,
         offset, n_cycles, total_score, planarity,
         quarter_anchor_orth_ratio, anchor_norm, fraction_samples_assigned,
-        min_samples_per_cycle, coverage_duration_fraction``.  The coverage
-        columns are report-only and are not folded into ``total_score``.
+        min_samples_per_cycle, coverage_duration_fraction,
+        candidate_source``.  ``candidate_source`` is the originating
+        :class:`~phase_coordinates.period_search.PeriodCandidate`'s
+        ``source`` (e.g. ``"periodogram"``, ``"autocorrelation"``,
+        ``"harmonic:periodogram"``) — a diagnostic/reporting field, not
+        used in scoring.  The coverage columns are likewise report-only
+        and are not folded into ``total_score``.
     """
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
@@ -402,9 +407,21 @@ def find_epochs_by_geometric_score(
             )
             if epochs.n_cycles < 2:
                 continue
-            score = score_epoch_geometry(
-                X_arr, epochs, sampling_rate_hz=fs, columns=None, weights=weights,
-            )
+            try:
+                score = score_epoch_geometry(
+                    X_arr, epochs, sampling_rate_hz=fs, columns=None, weights=weights,
+                )
+            except ValueError:
+                # A degenerate candidate (typically a harmonic-halved period
+                # close to period_search's min_period floor) can produce a
+                # cycle short enough that its quarter-cycle anchor time
+                # falls outside the recorded data window --
+                # interp_X_at_times(bounds_error=True) correctly refuses to
+                # extrapolate there. Such a candidate simply cannot be
+                # scored; skip it rather than let one bad candidate crash
+                # the whole search. This does not change total_score for
+                # any candidate that *can* be scored.
+                continue
             rows.append({
                 "period": period,
                 "offset": float(offset),
@@ -416,6 +433,7 @@ def find_epochs_by_geometric_score(
                 "fraction_samples_assigned": score["fraction_samples_assigned"],
                 "min_samples_per_cycle": score["min_samples_per_cycle"],
                 "coverage_duration_fraction": score["coverage_duration_fraction"],
+                "candidate_source": cand.source,
             })
             if score["total_score"] > best_score:
                 best_score = score["total_score"]
@@ -433,7 +451,7 @@ def find_epochs_by_geometric_score(
             "period", "offset", "n_cycles", "total_score",
             "planarity", "quarter_anchor_orth_ratio", "anchor_norm",
             "fraction_samples_assigned", "min_samples_per_cycle",
-            "coverage_duration_fraction",
+            "coverage_duration_fraction", "candidate_source",
         ],
     )
 

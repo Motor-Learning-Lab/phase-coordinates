@@ -278,11 +278,15 @@ def test_find_epochs_by_geometric_score_locks_onto_1s_period():
         "period", "offset", "n_cycles", "total_score",
         "planarity", "quarter_anchor_orth_ratio", "anchor_norm",
         "fraction_samples_assigned", "min_samples_per_cycle",
-        "coverage_duration_fraction",
+        "coverage_duration_fraction", "candidate_source",
     ]
     assert (table["fraction_samples_assigned"] >= 0).all()
     assert (table["fraction_samples_assigned"] <= 1).all()
     assert (table["coverage_duration_fraction"] >= 0).all()
+    assert table["candidate_source"].notna().all()
+    assert set(table["candidate_source"]) <= {"periodogram", "autocorrelation"} | {
+        f"harmonic:{s}" for s in ("periodogram", "autocorrelation")
+    }
     assert len(table) > 0
     assert best_epochs.source == "geometric_score"
 
