@@ -606,6 +606,43 @@ def _default_n_velocity_knots(n_cycles):
     return int(np.clip(2 * n_cycles, 4, 20))
 
 
+def _layer2_fit_sample_range(tau_mean, fs, n_time):
+    """
+    Inclusive ``(i0, i1)`` sample-index bounds of the fitted window, derived
+    from the same shared half-open ``[tau[0], tau[-1))`` rule as everywhere
+    else in the package (:func:`~phase_coordinates.epochs.cycle_index_from_tau`),
+    plus the full per-sample cycle index it computes along the way.
+
+    Both Layer 2's own fit set (built in :func:`_fit_layer2`) and the
+    exported samples table's per-sample placement (built later in
+    :func:`fit_bayesian_phase_coordinates`, from the identical
+    ``tau_mean``/``fs``/``n_time``) call this, so they always agree exactly
+    on which samples are "in the fit". Previously Layer 2 built its own
+    window from ``ceil(tau[0]*fs)``/``floor(tau[-1]*fs)`` -- unlike the
+    half-open rule, that keeps a sample landing exactly on ``tau[-1]``
+    inside the fit, while the exported ``samples["cycle"]`` column (built
+    from ``cycle_index_from_tau``) correctly excludes that same sample --
+    so the likelihood and the exported contract disagreed about which
+    observations belong to the fit.
+
+    Returns
+    -------
+    i0, i1 : int or None
+        Inclusive bounds, or ``(None, None)`` if no sample falls in the
+        window.
+    cycle_idx_full : ndarray, shape (n_time,)
+        Cycle index of every input sample (``-1`` outside the window);
+        ``cycle_idx_full[i0:i1+1]`` is exactly the per-sample cycle
+        membership for the fitted window (no further clipping needed).
+    """
+    full_time = np.arange(n_time) / fs
+    cycle_idx_full = cycle_index_from_tau(np.asarray(tau_mean, dtype=float), full_time)
+    fit_positions = np.flatnonzero(cycle_idx_full >= 0)
+    if len(fit_positions) == 0:
+        return None, None, cycle_idx_full
+    return int(fit_positions[0]), int(fit_positions[-1]), cycle_idx_full
+
+
 @dataclass
 class _Layer2Summary:
     """Internal posterior summary of the Layer 2 instantaneous model."""
@@ -674,9 +711,8 @@ def _fit_layer2(
     K = len(tau_mean)
     K_cyc = K - 1
 
-    i0 = max(0, int(np.ceil(tau_mean[0] * fs)))
-    i1 = min(X.shape[0] - 1, int(np.floor(tau_mean[-1] * fs)))
-    if i1 - i0 < 10:
+    i0, i1, cycle_idx_full = _layer2_fit_sample_range(tau_mean, fs, X.shape[0])
+    if i0 is None or i1 - i0 < 10:
         raise ValueError(
             "Not enough time samples spanned by the detected cycle boundaries "
             "to fit the Layer 2 model."
@@ -685,9 +721,10 @@ def _fit_layer2(
     t_fit = np.arange(i0, i1 + 1) / fs
     n_time = X_fit.shape[0]
 
-    # --- Cycle membership ---
-    cycle_idx_arr = np.searchsorted(tau_mean, t_fit, side="right") - 1
-    cycle_idx_arr = np.clip(cycle_idx_arr, 0, K_cyc - 1).astype(int)
+    # --- Cycle membership: the same half-open [tau[k], tau[k+1)) rule the
+    # exported samples table uses (see _layer2_fit_sample_range) -- not a
+    # separately reimplemented searchsorted+clip that could disagree with it.
+    cycle_idx_arr = cycle_idx_full[i0 : i1 + 1].astype(int)
     cycle_idx_const = pt.constant(cycle_idx_arr)
 
     # --- Layer 1 per-cycle summaries ---
@@ -1202,8 +1239,11 @@ def fit_bayesian_phase_coordinates(
     K_cyc = K - 1
 
     # ---- Determine fitted window indices ----
-    i0 = max(0, int(np.ceil(layer1.tau_mean[0] * fs)))
-    i1 = min(n_input_time - 1, int(np.floor(layer1.tau_mean[-1] * fs)))
+    # Same helper Layer 2 itself used to build its own fit set, from the
+    # identical tau_mean/fs/n_time -- bit-identical to the window the
+    # likelihood was actually evaluated on, not a second, independently
+    # rounded reconstruction that could disagree by one sample.
+    i0, i1, _ = _layer2_fit_sample_range(layer1.tau_mean, fs, n_input_time)
 
     # ---- Build samples DataFrame ----
     all_sample_index = np.arange(n_input_time)
@@ -1215,9 +1255,9 @@ def fit_bayesian_phase_coordinates(
     # NaN-initialized float column. This gives the standard integer
     # cycle_index with -1 outside [tau[0], tau[-1)) (matching the PCA path)
     # instead of float NaN, and, like the PCA path, "cycle" reflects pure
-    # time membership regardless of whether Layer 2 actually produced a
-    # fitted geometry value there (that's a separate concern, handled below
-    # by fit_indices/n_use exactly as before).
+    # time membership -- which, thanks to i0/i1 above coming from the same
+    # helper Layer 2 itself used, is now guaranteed to line up exactly with
+    # which samples actually received a fitted geometry value below.
     bayesian_epochs = CycleEpochs(
         tau=np.asarray(layer1.tau_mean, dtype=float),
         duration=np.diff(layer1.tau_mean),
@@ -1236,10 +1276,13 @@ def fit_bayesian_phase_coordinates(
     v_fit = layer2.radius_mean * np.sin(phase_in_cycle_fit)
     theta_wrapped_fit = np.angle(np.exp(1j * phase_in_cycle_fit))
 
-    # Cycle membership specifically for layer2's own (possibly shorter, see
-    # below) time grid, used only for the per-cycle perp aggregate in the
-    # cycles table -- same shared half-open rule, not a separately
-    # clipped/reimplemented one.
+    # Cycle membership for layer2's own time grid, used for the per-cycle
+    # perp aggregate in the cycles table below -- same shared half-open
+    # rule, not a separately clipped/reimplemented one. layer2.time is
+    # exactly arange(i0, i1+1)/fs (both i0/i1 and layer2's own fit window
+    # come from the same _layer2_fit_sample_range call), so this lines up
+    # with fit_indices below index-for-index, with no length mismatch to
+    # paper over.
     cycle_idx_arr = cycle_index_from_tau(layer1.tau_mean, layer2.time)
 
     # Build full arrays (NaN outside window)
@@ -1252,21 +1295,16 @@ def fit_bayesian_phase_coordinates(
     theta_wrapped_full = np.full(n_input_time, np.nan)
     perp_full = np.full(n_input_time, np.nan)
 
-    fit_slice = slice(i0, i1 + 1)
-    n_fit = i1 - i0 + 1
+    fit_indices = np.arange(i0, i1 + 1)
 
-    # layer2.time may not cover exactly i0..i1 in edge cases; use min length
-    n_use = min(n_fit, len(layer2.time))
-    fit_indices = np.arange(i0, i0 + n_use)
-
-    phase_full[fit_indices] = layer2.phase_mean[:n_use]
-    phase_in_cycle_full[fit_indices] = phase_in_cycle_fit[:n_use]
-    u_full[fit_indices] = u_fit[:n_use]
-    v_full[fit_indices] = v_fit[:n_use]
-    radius_full[fit_indices] = layer2.radius_mean[:n_use]
-    theta_full[fit_indices] = phase_in_cycle_fit[:n_use]
-    theta_wrapped_full[fit_indices] = theta_wrapped_fit[:n_use]
-    perp_full[fit_indices] = layer2.perp_deviation_mean[:n_use]
+    phase_full[fit_indices] = layer2.phase_mean
+    phase_in_cycle_full[fit_indices] = phase_in_cycle_fit
+    u_full[fit_indices] = u_fit
+    v_full[fit_indices] = v_fit
+    radius_full[fit_indices] = layer2.radius_mean
+    theta_full[fit_indices] = phase_in_cycle_fit
+    theta_wrapped_full[fit_indices] = theta_wrapped_fit
+    perp_full[fit_indices] = layer2.perp_deviation_mean
 
     samples = pd.DataFrame({
         "sample_index": all_sample_index,
@@ -1313,9 +1351,9 @@ def fit_bayesian_phase_coordinates(
         n_samples_k = s_stop_k - s_start_k
 
         # Compute perp stats within this cycle from fitted window
-        fit_mask_k = (cycle_idx_arr[:n_use] == k)
+        fit_mask_k = (cycle_idx_arr == k)
         if fit_mask_k.sum() > 0:
-            perp_k = layer2.perp_deviation_mean[:n_use][fit_mask_k]
+            perp_k = layer2.perp_deviation_mean[fit_mask_k]
             perp_mean_k = float(np.mean(perp_k))
             perp_sd_k = float(np.std(perp_k))
         else:

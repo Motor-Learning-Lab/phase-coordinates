@@ -402,6 +402,24 @@ def score_epoch_geometry(
     # bounded to <= 1 sample period of linear extrapolation, not silent
     # extrapolation over an unbounded distance.
     x_end_arr = interp_X_at_times(X_arr, fs, tau[1:], bounds_error=False)
+    # interp_X_at_times(bounds_error=False) *clamps* a query time past the
+    # data edge to the last recorded sample's value rather than
+    # extrapolating -- correct for most callers of that flag (e.g. a
+    # posterior-mean boundary that should just saturate at the edge), but
+    # wrong here specifically: only the very last cycle's own closing
+    # boundary (tau[-1]) can land past the last recorded sample (every
+    # other cycle's end boundary always has real data after it), and a
+    # clamped x_close there is *identical* to the trajectory's last real
+    # sample -- a zero-length closing segment that contributes no angle to
+    # the winding sum, silently reintroducing the exact undercount this
+    # closing-anchor mechanism exists to fix (see _cycle_winding). Replace
+    # it with a true linear extrapolation from the last two recorded
+    # samples, bounded to at most one sample period of overshoot by the
+    # same tau[-1] <= n_time/fs invariant documented above.
+    t_grid_last = (n_time - 1) / fs
+    if n_time >= 2 and tau[-1] > t_grid_last:
+        overshoot = tau[-1] - t_grid_last
+        x_end_arr[-1] = X_arr[-1] + overshoot * fs * (X_arr[-1] - X_arr[-2])
 
     per_cycle = []
     planarities = []
@@ -751,6 +769,10 @@ def find_epochs_by_geometric_score(
     if not period_candidates:
         raise ValueError("period_candidates is empty.")
     _normalize_score_weights(weights)  # raises if invalid; result unused here
+    if score_tolerance < 0:
+        raise ValueError(f"score_tolerance must be >= 0, got {score_tolerance}.")
+    if n_phase_offsets < 1:
+        raise ValueError(f"n_phase_offsets must be >= 1, got {n_phase_offsets}.")
     if winding_valid_min > winding_valid_max:
         raise ValueError(
             f"winding_valid_min ({winding_valid_min}) must not exceed "

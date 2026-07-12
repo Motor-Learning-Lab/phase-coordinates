@@ -1316,3 +1316,122 @@ def test_complete_endpoint_peak_start_side_ignores_unrelated_maximum():
 
     assert result is not None
     assert 285 <= result < 316, f"expected within the bounded window, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# 22. Bayesian Layer 2 fit window: shared half-open convention
+# ---------------------------------------------------------------------------
+
+def test_layer2_fit_sample_range_excludes_sample_exactly_on_final_boundary():
+    """A boundary landing exactly on a sample time must be excluded from
+    the fitted window, matching cycle_index_from_tau's half-open
+    [tau[0], tau[-1)) convention -- the same rule the exported samples
+    table uses. Previously Layer 2 built its own window from
+    ceil(tau[0]*fs)/floor(tau[-1]*fs), which *includes* a sample landing
+    exactly on tau[-1] (floor(tau[-1]*fs) is that sample's own index),
+    disagreeing with the exported cycle == -1 for that same sample."""
+    from phase_coordinates.bayesian import _layer2_fit_sample_range
+    from phase_coordinates.epochs import cycle_index_from_tau
+
+    fs = 100.0
+    n_time = 201  # sample times 0.00 .. 2.00s
+    tau_mean = np.array([0.5, 1.5])  # tau[-1] == 1.5s == sample index 150 exactly
+
+    i0, i1, cycle_idx_full = _layer2_fit_sample_range(tau_mean, fs, n_time)
+
+    assert i0 == 50   # first sample at-or-after tau[0] == 0.5s
+    assert i1 == 149  # last sample strictly before tau[-1] -- sample 150 excluded
+
+    full_time = np.arange(n_time) / fs
+    expected_cycle_idx = cycle_index_from_tau(tau_mean, full_time)
+    np.testing.assert_array_equal(cycle_idx_full, expected_cycle_idx)
+    assert expected_cycle_idx[150] == -1  # the boundary-exact sample is outside the fit
+    assert expected_cycle_idx[149] == 0   # the sample just before it is inside
+
+
+def test_layer2_fit_sample_range_disagrees_with_old_ceil_floor_construction():
+    """Directly demonstrates the bug this fix closes: the old
+    ceil(tau[0]*fs)/floor(tau[-1]*fs) construction included the
+    boundary-exact sample that the shared half-open rule correctly
+    excludes -- so the old Layer 2 likelihood and the exported samples
+    table disagreed about which observations belong to the fit."""
+    from phase_coordinates.bayesian import _layer2_fit_sample_range
+
+    fs = 100.0
+    n_time = 201
+    tau_mean = np.array([0.5, 1.5])
+
+    old_i1 = min(n_time - 1, int(np.floor(tau_mean[-1] * fs)))
+    assert old_i1 == 150  # old construction included the boundary-exact sample
+
+    _, new_i1, _ = _layer2_fit_sample_range(tau_mean, fs, n_time)
+    assert new_i1 == 149  # fixed construction correctly excludes it
+
+
+# ---------------------------------------------------------------------------
+# 23. find_epochs_by_geometric_score: remaining global-argument validation
+# ---------------------------------------------------------------------------
+
+def test_find_epochs_by_geometric_score_rejects_negative_score_tolerance():
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=50)
+    ref = dominant_reference_signal(X)
+    cands = period_candidates_from_periodogram(ref, fs, n_candidates=3)
+    with pytest.raises(ValueError, match="score_tolerance"):
+        find_epochs_by_geometric_score(
+            X, fs, period_candidates=cands, score_tolerance=-0.1,
+        )
+
+
+def test_find_epochs_by_geometric_score_rejects_non_positive_n_phase_offsets():
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=50)
+    ref = dominant_reference_signal(X)
+    cands = period_candidates_from_periodogram(ref, fs, n_candidates=3)
+    with pytest.raises(ValueError, match="n_phase_offsets"):
+        find_epochs_by_geometric_score(
+            X, fs, period_candidates=cands, n_phase_offsets=0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 24. Winding: final-cycle closing anchor beyond the recorded data window
+# ---------------------------------------------------------------------------
+
+def test_winding_final_cycle_extrapolates_past_data_edge_instead_of_clamping():
+    """When the last cycle's own closing boundary (tau[-1]) lies beyond the
+    last recorded sample -- the common case whenever the period divides the
+    recording length evenly, since candidate_epochs_from_period_offset
+    permits tau[-1] up to one sample period past the data -- the closing
+    anchor used by the winding calculation must be a true linear
+    extrapolation, not a clamp to the last recorded sample's own value.
+    Clamping makes the closing segment zero-length (x_close == the last
+    real sample), silently reintroducing the exact (n-1)/n undercount the
+    closing-anchor mechanism (see _cycle_winding) exists to fix -- here,
+    (100-1)/100 = 0.99 instead of ~1.0."""
+    fs = 100.0
+    period = 1.0
+    n_cycles = 4
+    samples_per_cycle = 100
+    n_time = n_cycles * samples_per_cycle  # no trailing cushion sample --
+                                             # tau[-1] lands exactly one
+                                             # sample period past the last
+                                             # recorded sample.
+    t = np.arange(n_time) / fs
+    theta = 2 * np.pi * t / period
+    tilt = np.pi / 6
+    X = np.column_stack([
+        np.cos(theta), np.sin(theta) * np.cos(tilt), np.sin(theta) * np.sin(tilt),
+    ])
+    epochs = candidate_epochs_from_period_offset(period, 0.0, sampling_rate_hz=fs, n_time=n_time)
+    t_grid_last = (n_time - 1) / fs
+    assert epochs.tau[-1] > t_grid_last, (
+        "test setup error: the final boundary must lie beyond the last "
+        "recorded sample for this test to exercise the extrapolation path"
+    )
+
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    last_cycle_winding_abs = abs(score["per_cycle"][-1]["winding"])
+
+    # A clamped closing anchor would read ~0.99 (the (n-1)/n undercount);
+    # a correct extrapolation reads within a hair of 1.0.
+    assert last_cycle_winding_abs == pytest.approx(1.0, abs=0.002)
+    assert score["fraction_single_lap_cycles"] == 1.0

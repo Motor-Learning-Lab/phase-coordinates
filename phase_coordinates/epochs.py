@@ -100,9 +100,15 @@ class CycleEpochs:
             raise ValueError("duration must equal diff(tau).")
 
         cycle_index = np.asarray(self.cycle_index)
+        if not np.issubdtype(cycle_index.dtype, np.integer):
+            raise ValueError(
+                f"cycle_index must have an integer dtype, got {cycle_index.dtype}."
+            )
         time = np.asarray(self.time)
         if not np.all(np.isfinite(time)):
             raise ValueError("time must be finite.")
+        if len(time) >= 2 and np.any(np.diff(time) <= 0):
+            raise ValueError("time must be strictly increasing.")
         if cycle_index.shape != time.shape:
             raise ValueError(
                 f"cycle_index has shape {cycle_index.shape} but time has "
@@ -116,6 +122,41 @@ class CycleEpochs:
                 f"cycle_index must be in {{-1, 0, ..., {K - 1}}} (K={K} "
                 f"cycles); got out-of-range value(s) {bad[:5].tolist()}."
             )
+
+        # _compute_sample_bounds' single-pass vectorization (below) assumes
+        # cycle_index looks like [-1]*p + [monotonic run over 0..K-1] +
+        # [-1]*s -- i.e. every -1 sample is a prefix/suffix, never sandwiched
+        # between two assigned samples, and assigned values never decrease.
+        # Every constructor in this package satisfies this by construction
+        # (time is the sorted sample grid; cycle_index comes from a
+        # half-open interval assignment over sorted tau), but nothing
+        # previously stopped a directly-constructed CycleEpochs from
+        # violating it -- which _compute_sample_bounds would not have
+        # detected, either silently corrupting an unrelated cycle's bounds
+        # (via numpy's negative-index wraparound when -1 sneaks into a
+        # value used for fancy indexing) or silently dropping one of two
+        # non-contiguous same-valued runs. Enforced here instead, once, so
+        # every downstream consumer of sample_start/sample_stop can rely on
+        # it without re-checking.
+        valid_mask = cycle_index >= 0
+        if np.any(valid_mask):
+            first_valid = int(np.argmax(valid_mask))
+            last_valid = len(valid_mask) - 1 - int(np.argmax(valid_mask[::-1]))
+            valid_span = cycle_index[first_valid : last_valid + 1]
+            if np.any(valid_span < 0):
+                raise ValueError(
+                    "cycle_index must not contain -1 (unassigned) samples "
+                    "between the first and last assigned sample -- only as "
+                    "a prefix and/or suffix. Sample-bound lookups assume "
+                    "assigned samples form one contiguous, time-ordered span."
+                )
+            if np.any(np.diff(valid_span) < 0):
+                raise ValueError(
+                    "cycle_index must be non-decreasing across assigned "
+                    "(non -1) samples -- each cycle must occupy one "
+                    "contiguous block in time order, not be revisited "
+                    "after a later cycle's samples begin."
+                )
 
         if self.phase is not None:
             phase = np.asarray(self.phase)
