@@ -788,3 +788,64 @@ class TestPublicContract:
         assert "diagnostics" in details
         X_hat = reconstruct_phase_coordinates(samples, cycles)
         assert X_hat.shape == X.shape
+
+    @pytest.mark.slow
+    def test_bayesian_output_matches_shared_contract(self):
+        """The Bayesian samples/cycles output must actually satisfy the
+        same contract the PCA path does: preserve the input pandas index,
+        use integer cycle assignment with -1 outside the fitted window (not
+        float NaN), and never let adjacent cycles' sample ranges overlap."""
+        pytest.importorskip("pymc")
+        from phase_coordinates import fit_bayesian_phase_coordinates
+        rng = np.random.default_rng(1)
+        fs = 100.0
+        n_per_cycle = 100
+        n_cycles = 4
+        n = n_per_cycle * n_cycles
+        t = np.arange(n) / fs
+        tilt = np.pi / 6
+        X_arr = np.column_stack([
+            np.cos(2 * np.pi * t),
+            np.sin(2 * np.pi * t) * np.cos(tilt),
+            np.sin(2 * np.pi * t) * np.sin(tilt),
+        ])
+        X_arr += rng.normal(0, 0.02, X_arr.shape)
+
+        # Non-default index: neither the default RangeIndex(0, n) nor
+        # sorted-from-zero, so silently falling back to a default index
+        # would be detectable.
+        custom_index = pd.RangeIndex(start=5000, stop=5000 + n, step=1)
+        X = pd.DataFrame(X_arr, columns=["x", "y", "z"], index=custom_index)
+
+        samples, cycles, details = fit_bayesian_phase_coordinates(
+            X, sampling_rate_hz=fs, draws=100, tune=100, chains=2, random_seed=0
+        )
+
+        # 1. Index preserved, same as the PCA path.
+        pd.testing.assert_index_equal(samples.index, X.index)
+
+        # 2. Integer cycle assignment, -1 outside the fitted window --
+        # not float NaN.
+        assert samples["cycle"].dtype.kind == "i"
+        assert (samples["cycle"] == -1).any(), (
+            "expected at least one sample outside the fitted window for a "
+            "4-cycle recording with real endpoint boundary uncertainty"
+        )
+        assert set(samples["cycle"].unique()) <= set(range(-1, len(cycles)))
+
+        # 3. Adjacent cycles' sample ranges never overlap (half-open
+        # [sample_start, sample_stop) with sample_stop of cycle k <=
+        # sample_start of cycle k+1).
+        starts = cycles["sample_start"].to_numpy()
+        stops = cycles["sample_stop"].to_numpy()
+        assert np.all(stops[:-1] <= starts[1:]), (
+            f"adjacent cycles overlap: sample_stop={stops[:-1]} vs "
+            f"next sample_start={starts[1:]}"
+        )
+        # sample_stop is one past the last sample *actually* assigned to
+        # that cycle in the samples table, not merely floor(t_stop*fs)+1.
+        for k in range(len(cycles)):
+            member_idx = np.flatnonzero(samples["cycle"].to_numpy() == k)
+            if member_idx.size:
+                assert stops[k] == member_idx[-1] + 1
+                assert starts[k] == member_idx[0]

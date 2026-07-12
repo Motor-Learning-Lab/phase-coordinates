@@ -142,6 +142,61 @@ class CycleEpochs:
         """Number of cycles ``K``."""
         return int(len(self.tau) - 1)
 
+    def _compute_sample_bounds(self) -> "tuple[np.ndarray, np.ndarray]":
+        """
+        Single-pass, vectorized computation of ``(sample_start, sample_stop)``
+        shared by both properties below, so retrieving either is
+        ``O(N + K)`` rather than the ``O(K*N)`` of one full
+        ``cycle_index`` scan per cycle.
+
+        Exploits an invariant of every :class:`CycleEpochs` constructor:
+        samples are time-ordered and ``tau`` is sorted, so a fixed set of
+        half-open ``[tau[k], tau[k+1))`` intervals can only ever assign a
+        *monotonic non-decreasing* sequence of cycle indices -- i.e.
+        ``cycle_index`` always looks like ``[-1]*p + [0, 0, .., 1, 1, ..,
+        K-1] + [-1]*s`` for some prefix/suffix length ``p``/``s`` (either
+        may be zero). That means cycle boundaries within the valid ``0..K-1``
+        region can be found with one ``np.diff`` pass instead of one
+        ``np.where`` scan per cycle. A cycle can still be genuinely empty
+        (no sample at all, e.g. a very short candidate cycle) anywhere in
+        that region, including between two non-empty ones, not just at the
+        edges -- handled the same way as before, via ``searchsorted`` on
+        ``tau[k]``.
+        """
+        K = self.n_cycles
+        starts = np.empty(K, dtype=int)
+        stops = np.empty(K, dtype=int)
+
+        valid_mask = self.cycle_index >= 0
+        if np.any(valid_mask):
+            first_valid = int(np.argmax(valid_mask))
+            last_valid = len(valid_mask) - 1 - int(np.argmax(valid_mask[::-1]))
+            valid_ci = self.cycle_index[first_valid : last_valid + 1]
+
+            change_points = np.flatnonzero(np.diff(valid_ci)) + 1
+            block_start_offsets = np.concatenate([[0], change_points])
+            block_stop_offsets = np.concatenate([change_points, [len(valid_ci)]])
+            block_values = valid_ci[block_start_offsets]
+
+            starts.fill(-1)
+            starts[block_values] = first_valid + block_start_offsets
+            stops[block_values] = first_valid + block_stop_offsets
+        else:
+            starts.fill(-1)
+
+        empty = starts < 0
+        if np.any(empty):
+            # Empty cycle: point at the smallest sample_index at-or-after
+            # tau[k]. We only need this as a placeholder; length is zero
+            # because sample_stop = sample_start.
+            empty_k = np.flatnonzero(empty)
+            after = np.searchsorted(self.time, self.tau[empty_k], side="left")
+            after = np.minimum(after, len(self.time))
+            starts[empty_k] = after
+            stops[empty_k] = after
+
+        return starts, stops
+
     @property
     def sample_start(self) -> np.ndarray:
         """First sample index in each cycle, shape ``(K,)``.
@@ -150,33 +205,22 @@ class CycleEpochs:
         that first sample.  For empty cycles (no sample falls inside),
         ``sample_start == sample_stop`` and both equal the smallest sample
         index at-or-after ``tau[k]``.
+
+        Call once and reuse the result rather than indexing this property
+        inside a per-cycle loop -- each access recomputes the full ``(K,)``
+        array (``O(N + K)``; still cheap for one call, but ``O(K)`` calls in
+        a loop would make it ``O(K*(N+K))`` again).
         """
-        K = self.n_cycles
-        starts = np.zeros(K, dtype=int)
-        for k in range(K):
-            hit = np.where(self.cycle_index == k)[0]
-            if hit.size > 0:
-                starts[k] = int(hit[0])
-            else:
-                # Empty cycle: point at the smallest sample_index at-or-after
-                # tau[k].  We only need this as a placeholder; length is
-                # zero because sample_stop = sample_start.
-                after = np.searchsorted(self.time, self.tau[k], side="left")
-                starts[k] = int(min(after, len(self.time)))
+        starts, _ = self._compute_sample_bounds()
         return starts
 
     @property
     def sample_stop(self) -> np.ndarray:
-        """One past the last sample index in each cycle (Python slice), shape ``(K,)``."""
-        K = self.n_cycles
-        stops = np.zeros(K, dtype=int)
-        starts = self.sample_start
-        for k in range(K):
-            hit = np.where(self.cycle_index == k)[0]
-            if hit.size > 0:
-                stops[k] = int(hit[-1]) + 1
-            else:
-                stops[k] = int(starts[k])
+        """One past the last sample index in each cycle (Python slice), shape ``(K,)``.
+
+        Call once and reuse the result -- see :attr:`sample_start`.
+        """
+        _, stops = self._compute_sample_bounds()
         return stops
 
     @property
@@ -193,6 +237,46 @@ class CycleEpochs:
     def time_quarter(self) -> np.ndarray:
         """Quarter-cycle times: ``tau[:-1] + 0.25 * duration`` (shape ``(K,)``)."""
         return self.tau[:-1] + 0.25 * self.duration
+
+
+def cycle_index_from_tau(tau: np.ndarray, time: np.ndarray) -> np.ndarray:
+    """
+    Assign each sample time to a half-open cycle interval
+    ``[tau[k], tau[k+1))``, given monotonically increasing boundary times
+    ``tau`` (shape ``(K+1,)``).
+
+    This is the single shared implementation of the package-wide half-open
+    boundary convention used by :func:`epochs_from_boundary_indices`,
+    :func:`~phase_coordinates.scoring.candidate_epochs_from_period_offset`,
+    and the Bayesian cycle-membership assignment in
+    :func:`~phase_coordinates.bayesian.fit_bayesian_phase_coordinates` --
+    factored out so all three derive cycle membership the same way instead
+    of maintaining parallel (and easily subtly-inconsistent) copies of the
+    same ``searchsorted`` logic.
+
+    Parameters
+    ----------
+    tau : ndarray, shape (K + 1,)
+        Strictly increasing boundary times in seconds. ``K = len(tau) - 1``
+        may be 0 (no cycles), in which case every sample gets ``-1``.
+    time : ndarray, shape (n_time,)
+        Sample times in seconds.
+
+    Returns
+    -------
+    ndarray, shape (n_time,), int
+        Cycle index per sample, in ``{-1, 0, ..., K-1}``. ``-1`` for samples
+        before ``tau[0]`` or at/after ``tau[-1]``.
+    """
+    tau = np.asarray(tau, dtype=float)
+    time = np.asarray(time, dtype=float)
+    K = len(tau) - 1
+    if K <= 0:
+        return np.full(time.shape, -1, dtype=int)
+    ci = np.searchsorted(tau, time, side="right") - 1
+    outside = (ci < 0) | (ci >= K) | (time < tau[0]) | (time >= tau[-1])
+    ci[outside] = -1
+    return ci.astype(int)
 
 
 def identify_cycles_from_phase(
@@ -377,13 +461,7 @@ def epochs_from_boundary_indices(
     duration = np.diff(tau)
 
     time = np.arange(n_time) / fs
-    K = len(duration)
-    # For each sample, which cycle does it belong to?  searchsorted with
-    # side="right" gives k where tau[k] <= t < tau[k+1] (offset by one).
-    ci = np.searchsorted(tau, time, side="right") - 1
-    # Mask samples outside [tau[0], tau[-1])
-    outside = (ci < 0) | (ci >= K) | (time < tau[0]) | (time >= tau[-1])
-    ci[outside] = -1
+    ci = cycle_index_from_tau(tau, time)
 
     md = dict(metadata) if metadata else {}
     md.setdefault("sampling_rate_hz", fs)
@@ -391,7 +469,7 @@ def epochs_from_boundary_indices(
     return CycleEpochs(
         tau=tau,
         duration=duration,
-        cycle_index=ci.astype(int),
+        cycle_index=ci,
         phase=None,
         phase_in_cycle=None,
         time=time,

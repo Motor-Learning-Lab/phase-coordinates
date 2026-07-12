@@ -345,14 +345,22 @@ def fit_pca_phase_coordinates(
     # min_samples_per_cycle filter still appear, with fit_ok=False and NaN
     # geometry, so len(cycles) == epochs.n_cycles always holds and callers
     # can distinguish "fitted" from "never fitted".
+    #
+    # sample_start/sample_stop are computed once here and indexed inside the
+    # loop -- each access recomputes the full (K,) array, so indexing
+    # epochs.sample_start[cyc_k] directly inside the loop would redo that
+    # computation on every iteration (O(K) accesses of an O(N+K) computation
+    # each -- O(K*N) overall for cycles-table construction).
+    all_sample_start = epochs.sample_start
+    all_sample_stop = epochs.sample_stop
     cycle_rows = []
     for cyc_k in range(K):
         t_start = float(epochs.tau[cyc_k])
         t_stop = float(epochs.tau[cyc_k + 1])
         duration = t_stop - t_start
         t_quarter = t_start + 0.25 * duration
-        s_start = int(epochs.sample_start[cyc_k])
-        s_stop = int(epochs.sample_stop[cyc_k])
+        s_start = int(all_sample_start[cyc_k])
+        s_stop = int(all_sample_stop[cyc_k])
 
         m = models.get(cyc_k)
         if m is None:

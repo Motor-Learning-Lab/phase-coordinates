@@ -53,8 +53,12 @@ def compute_cycle_quality(
 
     Parameters
     ----------
-    X : array-like or DataFrame, shape (n_time, n_features)
-        Multivariate trajectory.  Requires at least 3 features.
+    X : array-like or DataFrame, shape (n_time, 3)
+        Multivariate trajectory.  Requires *exactly* 3 features -- pass
+        ``columns=[...]`` to select 3 out of a higher-dimensional
+        DataFrame. Planarity (PCA over all of ``X``) and anchor geometry
+        (interpolated directly from ``X``) must agree on which dimensions
+        they're computed from.
     epochs : CycleEpochs
         Cycle assignment from any identification stage.
     sampling_rate_hz : float
@@ -69,7 +73,9 @@ def compute_cycle_quality(
 
     Notes
     -----
-    - ``planarity_ratio = 1 - PC3_var / total_var``.
+    - ``planarity_ratio = PC1_var_ratio + PC2_var_ratio`` (variance
+      explained by the best-fit 2-D plane), equal to ``1 - PC3_var /
+      total_var`` only because ``X`` is fixed at exactly 3 dimensions here.
     - ``anchor_norm``/``quarter_anchor_orth_*`` use trajectory positions at
       cycle start and quarter-cycle time, linearly interpolated.
     - ``orientation_score`` = dot(``n_aligned_k``, ``global_n_mean``), where
@@ -92,8 +98,13 @@ def compute_cycle_quality(
     X_arr = _resolve_X(X, columns)
     if X_arr.ndim != 2:
         raise ValueError("X must have shape (n_time, n_features).")
-    if X_arr.shape[1] < 3:
-        raise ValueError("Need at least 3 features for diagnostics.")
+    if X_arr.shape[1] != 3:
+        raise ValueError(
+            f"compute_cycle_quality requires exactly 3 features, got "
+            f"{X_arr.shape[1]}. Select exactly 3 columns via columns=... "
+            "if X has more (planarity and anchor geometry must agree on "
+            "which 3 dimensions they're both computed from)."
+        )
     fs = float(sampling_rate_hz)
     if fs <= 0:
         raise ValueError(f"sampling_rate_hz must be positive, got {fs}.")
@@ -113,12 +124,14 @@ def compute_cycle_quality(
     sample_start = epochs.sample_start
     sample_stop = epochs.sample_stop
 
-    # Anchors (in first 3 dims)
-    X3 = X_arr[:, :3]
+    # Anchors. X_arr is always exactly 3 columns (see the dimensionality
+    # check above), so this and the PCA planarity below always agree on
+    # which 3 dimensions they're computed from.
+    X3 = X_arr
     x0_arr = interp_X_at_times(X3, fs, tau[:-1])
     x90_arr = interp_X_at_times(X3, fs, tau[:-1] + 0.25 * duration)
 
-    # Per-cycle centers (mean over samples in the cycle, in first 3 dims)
+    # Per-cycle centers (mean over samples in the cycle)
     centers3 = np.zeros((K, 3))
     for k in range(K):
         idx = np.where(epochs.cycle_index == k)[0]
@@ -166,18 +179,19 @@ def compute_cycle_quality(
         idx = np.where(epochs.cycle_index == k)[0]
         n_k = int(idx.size)
 
-        # PCA per cycle
+        # PCA per cycle. X_arr is always exactly 3 columns, so n_components=3
+        # always fully accounts for the variance (pcs sums to 1).
         pcs = np.array([np.nan, np.nan, np.nan])
         planarity_k = float("nan")
         if n_k >= 3:
             X_k = X_arr[idx]
-            pca = PCA(n_components=min(3, X_k.shape[1]))
+            pca = PCA(n_components=3)
             pca.fit(X_k - X_k.mean(axis=0))
-            evr = pca.explained_variance_ratio_
-            if len(evr) < 3:
-                evr = np.concatenate([evr, np.zeros(3 - len(evr))])
-            pcs = evr[:3].astype(float)
-            planarity_k = float(1.0 - pcs[2])
+            pcs = pca.explained_variance_ratio_.astype(float)
+            # Variance explained by the best-fit 2-D plane (PC1 + PC2), not
+            # "1 - PC3" -- only equal here because pcs always sums to 1
+            # (exactly 3 dimensions in, exactly 3 components out).
+            planarity_k = float(pcs[0] + pcs[1])
 
         orient_k = float(np.dot(n_aligned[k], global_n_mean))
         signed_orient_k = float(np.dot(n_arr[k], global_n_mean))

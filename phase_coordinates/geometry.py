@@ -9,6 +9,22 @@ from __future__ import annotations
 import numpy as np
 
 
+class AnchorOutOfBoundsError(ValueError):
+    """
+    Raised by :func:`interp_X_at_times` when a query time falls outside the
+    recorded data window and ``bounds_error=True``.
+
+    Subclasses ``ValueError`` so existing code that catches the broader type
+    keeps working, but gives callers that specifically mean "this
+    candidate's anchor time simply isn't in the data" (an expected,
+    per-candidate failure mode during a period/offset search -- see
+    :func:`~phase_coordinates.scoring.find_epochs_by_geometric_score`) a way
+    to catch *that* narrowly, distinct from an unrelated ``ValueError``
+    (bad arguments, a real bug elsewhere) that should propagate instead of
+    being silently treated as "this candidate didn't work out."
+    """
+
+
 def interp_X_at_times(X, fs, times, *, bounds_error: bool = True):
     """
     Linearly interpolate rows of ``X`` at real-valued times.
@@ -22,19 +38,26 @@ def interp_X_at_times(X, fs, times, *, bounds_error: bool = True):
     times : array-like, shape (m,)
         Query times in seconds.
     bounds_error : bool
-        If ``True`` (the default), raise ``ValueError`` when any query time
-        falls outside ``[0, (n_time-1)/fs]`` rather than silently clamping
-        to the edge value.  A candidate anchor time that lands outside the
-        signal window is usually a sign of a bad candidate (e.g. a bad
-        period/offset guess), and clamping would give it a plausible-looking
-        but wrong value.  Pass ``bounds_error=False`` for callers that
-        genuinely intend extrapolation-by-clamping (e.g. posterior-mean
-        boundary times that may drift slightly past the data edge).
+        If ``True`` (the default), raise :class:`AnchorOutOfBoundsError`
+        when any query time falls outside ``[0, (n_time-1)/fs]`` rather
+        than silently clamping to the edge value.  A candidate anchor time
+        that lands outside the signal window is usually a sign of a bad
+        candidate (e.g. a bad period/offset guess), and clamping would give
+        it a plausible-looking but wrong value.  Pass ``bounds_error=False``
+        for callers that genuinely intend extrapolation-by-clamping (e.g.
+        posterior-mean boundary times that may drift slightly past the data
+        edge).
 
     Returns
     -------
     ndarray, shape (m, n_features)
         Trajectory linearly interpolated at ``times``.
+
+    Raises
+    ------
+    AnchorOutOfBoundsError
+        If ``bounds_error=True`` and any query time is outside the data
+        window. A subclass of ``ValueError``.
     """
     X = np.asarray(X, dtype=float)
     times = np.asarray(times, dtype=float)
@@ -47,7 +70,7 @@ def interp_X_at_times(X, fs, times, *, bounds_error: bool = True):
         out_of_bounds = (times < t_lo - eps) | (times > t_hi + eps)
         if np.any(out_of_bounds):
             bad = times[out_of_bounds]
-            raise ValueError(
+            raise AnchorOutOfBoundsError(
                 f"interp_X_at_times: {len(bad)} query time(s) fall outside "
                 f"the signal window [{t_lo:.6g}, {t_hi:.6g}] seconds "
                 f"(e.g. {bad[0]:.6g}). Pass bounds_error=False to clamp to "

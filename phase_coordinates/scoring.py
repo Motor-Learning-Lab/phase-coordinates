@@ -12,14 +12,14 @@ same contract every downstream stage consumes.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 
-from .epochs import CycleEpochs, epochs_from_boundary_indices
-from .geometry import interp_X_at_times, oriented_frame_from_anchors
+from .epochs import CycleEpochs, cycle_index_from_tau, epochs_from_boundary_indices
+from .geometry import AnchorOutOfBoundsError, interp_X_at_times, oriented_frame_from_anchors
 
 
 DEFAULT_SCORE_WEIGHTS = {
@@ -52,7 +52,7 @@ _WINDING_DEGENERATE_RADIUS_FRAC = 0.05
 _WINDING_MIN_VALID_TRANSITION_FRACTION = 0.5
 
 
-def _cycle_winding(X_k, center_k, pca):
+def _cycle_winding(X_k, center_k, pca, x_close=None):
     """
     Signed winding number (revolutions, in time order) of one cycle's
     samples, using the in-plane (PC1, PC2) coordinates of an *already
@@ -74,13 +74,29 @@ def _cycle_winding(X_k, center_k, pca):
     no reliable evidence either way and must not be silently treated as a
     valid single lap.
 
+    Parameters
+    ----------
+    x_close : ndarray, shape (D,), optional
+        Trajectory position at the cycle's own end boundary (``tau[k+1]``),
+        already interpolated by the caller. Summing only *consecutive
+        recorded samples* systematically undercounts a genuine single lap:
+        for ``n`` evenly-spaced samples spanning one clean revolution
+        (first sample at the start boundary, last sample one slot short of
+        the end boundary), that sum is ``(n-1)/n`` turns, not ``1`` -- a
+        3-sample cycle would measure ``2/3 ~= 0.667``, below the default
+        ``0.75`` validity floor, purely because the closing segment (last
+        recorded sample -> the cycle's actual endpoint) was never included.
+        When given, ``x_close`` is appended as one extra point after the
+        last real sample, adding that closing transition. Pass ``None`` to
+        omit (matches the old, undercounting behavior).
+
     Returns
     -------
     winding : float
         Signed winding number, or NaN if undefined.
     n_valid_transitions, n_total_transitions : int
         Diagnostic counts (e.g. for reporting how much of a cycle was
-        usable).
+        usable). Includes the closing transition when ``x_close`` is given.
     """
     n_k = X_k.shape[0]
     n_total = max(0, n_k - 1)
@@ -88,9 +104,16 @@ def _cycle_winding(X_k, center_k, pca):
         return float("nan"), 0, n_total
 
     scores = pca.transform(X_k - center_k)
+    if x_close is not None:
+        close_score = pca.transform((np.asarray(x_close, dtype=float) - center_k).reshape(1, -1))
+        scores = np.vstack([scores, close_score])
+        n_total += 1
+
     u, v = scores[:, 0], scores[:, 1]
     r = np.hypot(u, v)
-    radius_scale = float(np.median(r))
+    # Typical-radius scale from the real recorded samples only, so a
+    # potentially-clamped x_close can't skew what counts as "degenerate".
+    radius_scale = float(np.median(r[:n_k]))
     if not np.isfinite(radius_scale) or radius_scale < 1e-12:
         return float("nan"), 0, n_total
 
@@ -108,6 +131,31 @@ def _cycle_winding(X_k, center_k, pca):
     return winding, n_valid, n_total
 
 
+def _normalize_score_weights(weights: Optional[dict]) -> dict:
+    """
+    Merge ``weights`` with :data:`DEFAULT_SCORE_WEIGHTS` and rescale to sum
+    to 1.
+
+    Shared by :func:`score_epoch_geometry` (called once per candidate) and
+    :func:`find_epochs_by_geometric_score` (called once upfront purely to
+    validate -- see its docstring). Keeping one implementation means a bad
+    ``weights`` argument is detected identically in both places, rather
+    than risking a second, subtly different copy of the same rule.
+
+    Raises
+    ------
+    ValueError
+        If the merged weights don't sum to a positive value.
+    """
+    w = dict(DEFAULT_SCORE_WEIGHTS)
+    if weights:
+        w.update(weights)
+    total_w = sum(w.values())
+    if total_w <= 0:
+        raise ValueError("Score weights must sum to a positive value.")
+    return {k: v / total_w for k, v in w.items()}
+
+
 def _resolve_X_and_columns(X, columns):
     if isinstance(X, pd.DataFrame):
         if columns is not None:
@@ -118,8 +166,19 @@ def _resolve_X_and_columns(X, columns):
         X_arr = np.asarray(X, dtype=float)
     if X_arr.ndim != 2:
         raise ValueError("X must have shape (n_time, n_features).")
-    if X_arr.shape[1] < 3:
-        raise ValueError("Need at least 3 features for planarity scoring.")
+    if X_arr.shape[1] != 3:
+        # Geometric scoring requires exactly 3 dimensions: PCA planarity
+        # would otherwise be computed over however many columns are given,
+        # while anchor geometry only ever used the first 3 -- results would
+        # silently depend on which columns happen to be first. Pass
+        # columns=[...] to select exactly 3 out of a higher-dimensional
+        # DataFrame if needed.
+        raise ValueError(
+            f"Geometric scoring requires exactly 3 features, got "
+            f"{X_arr.shape[1]}. Select exactly 3 columns via columns=... "
+            "if X has more (planarity and anchor geometry must agree on "
+            "which 3 dimensions they're both computed from)."
+        )
     return X_arr
 
 
@@ -192,13 +251,7 @@ def candidate_epochs_from_period_offset(
     duration = np.diff(tau)
 
     time = np.arange(n_time) / fs
-    K = len(duration)
-    if K == 0:
-        ci = np.full(n_time, -1, dtype=int)
-    else:
-        ci = np.searchsorted(tau, time, side="right") - 1
-        outside = (ci < 0) | (ci >= K) | (time < tau[0]) | (time >= tau[-1])
-        ci[outside] = -1
+    ci = cycle_index_from_tau(tau, time)
 
     md = dict(metadata) if metadata else {}
     md.setdefault("period", period)
@@ -208,7 +261,7 @@ def candidate_epochs_from_period_offset(
     return CycleEpochs(
         tau=tau,
         duration=duration,
-        cycle_index=ci.astype(int),
+        cycle_index=ci,
         phase=None,
         phase_in_cycle=None,
         time=time,
@@ -232,9 +285,14 @@ def score_epoch_geometry(
 
     For each cycle we compute:
 
-    - **planarity** = ``1 - PC3_var / total_var`` from a per-cycle 3-component
-      PCA.  ``1`` means the cycle lives in a plane; ``0`` means it spreads
-      isotropically.
+    - **planarity** = ``PC1_var_ratio + PC2_var_ratio`` (the variance
+      explained by the best-fit 2-D plane) from a per-cycle 3-component PCA
+      over exactly 3 dimensions.  ``1`` means the cycle lives in a plane;
+      ``0`` means it spreads isotropically.  Equivalent to ``1 - PC3_var /
+      total_var`` only because ``X`` is fixed at exactly 3 dimensions here
+      (see the dimensionality contract below) -- with more dimensions
+      those would differ, since ``1 - PC3`` would then also count variance
+      in PC4, PC5, ... that was never part of the fitted plane at all.
     - **anchor_norm** = ``||x0 - center||``, where ``x0`` is the trajectory
       interpolated at the cycle start.  Larger means the phase-zero anchor
       sits well away from the cycle center (as expected for a near-circular
@@ -255,8 +313,14 @@ def score_epoch_geometry(
 
     Parameters
     ----------
-    X : array-like or DataFrame, shape (n_time, n_features)
-        Multivariate trajectory.  Requires at least 3 features.
+    X : array-like or DataFrame, shape (n_time, 3)
+        Multivariate trajectory.  Requires *exactly* 3 features -- pass
+        ``columns=[...]`` to select 3 out of a higher-dimensional
+        DataFrame.  Planarity (a per-cycle PCA over all of ``X``) and
+        anchor geometry (interpolated directly from ``X``) must agree on
+        which dimensions they're computed from; allowing more than 3 and
+        silently using only the first 3 for anchors made results depend on
+        column order.
     epochs : CycleEpochs
         Candidate cycle epochs.
     sampling_rate_hz : float
@@ -301,13 +365,7 @@ def score_epoch_geometry(
         raise ValueError(f"sampling_rate_hz must be positive, got {fs}.")
     n_time = X_arr.shape[0]
 
-    w = dict(DEFAULT_SCORE_WEIGHTS)
-    if weights:
-        w.update(weights)
-    total_w = sum(w.values())
-    if total_w <= 0:
-        raise ValueError("Score weights must sum to a positive value.")
-    w = {k: v / total_w for k, v in w.items()}
+    w = _normalize_score_weights(weights)
 
     K = epochs.n_cycles
     if K == 0:
@@ -331,8 +389,19 @@ def score_epoch_geometry(
     tau = epochs.tau
     duration = epochs.duration
 
-    x0_arr = interp_X_at_times(X_arr[:, :3], fs, tau[:-1])
-    x90_arr = interp_X_at_times(X_arr[:, :3], fs, tau[:-1] + 0.25 * duration)
+    x0_arr = interp_X_at_times(X_arr, fs, tau[:-1])
+    x90_arr = interp_X_at_times(X_arr, fs, tau[:-1] + 0.25 * duration)
+    # Cycle end-boundary anchors, for closing the winding sum (see
+    # _cycle_winding). bounds_error=False (unlike x0_arr/x90_arr above) is
+    # deliberate here, not a loosening of the same check: every CycleEpochs
+    # constructor in this package guarantees tau[-1] <= n_time/fs, at most
+    # one sample period past the last real sample (the package-wide
+    # half-open convention that lets a closing boundary land there without
+    # requiring data at that exact instant -- see
+    # candidate_epochs_from_period_offset). So the clamp this can trigger is
+    # bounded to <= 1 sample period of linear extrapolation, not silent
+    # extrapolation over an unbounded distance.
+    x_end_arr = interp_X_at_times(X_arr, fs, tau[1:], bounds_error=False)
 
     per_cycle = []
     planarities = []
@@ -347,27 +416,32 @@ def score_epoch_geometry(
         n_k = len(idx)
         n_samples_per.append(n_k)
 
-        # Per-cycle PCA + planarity
+        # Per-cycle PCA + planarity. X_arr is always exactly 3 columns (see
+        # _resolve_X_and_columns), so planarity and anchor geometry below
+        # are always computed from the same 3 dimensions.
         if n_k >= 3:
             X_k = X_arr[idx]
             center_k = X_k.mean(axis=0)
-            pca = PCA(n_components=min(3, X_k.shape[1]))
+            pca = PCA(n_components=3)
             pca.fit(X_k - center_k)
             evr = pca.explained_variance_ratio_
-            if len(evr) < 3:
-                evr = np.concatenate([evr, np.zeros(3 - len(evr))])
-            planarity_k = float(1.0 - evr[2])
-            winding_k, n_valid_trans, n_total_trans = _cycle_winding(X_k, center_k, pca)
+            # Variance explained by the best 2-D plane (PC1 + PC2), i.e. the
+            # planar-loop fraction -- *not* "1 - PC3" (only equal to this
+            # when evr sums to 1 across exactly 3 components, which it now
+            # always does since X_arr is fixed at exactly 3 dimensions).
+            planarity_k = float(evr[0] + evr[1])
+            winding_k, n_valid_trans, n_total_trans = _cycle_winding(
+                X_k, center_k, pca, x_close=x_end_arr[k],
+            )
         else:
-            X_k = X_arr[idx] if n_k > 0 else np.empty((0, X_arr.shape[1]))
-            center_k = X_k.mean(axis=0) if n_k > 0 else np.zeros(X_arr.shape[1])
+            X_k = X_arr[idx] if n_k > 0 else np.empty((0, 3))
+            center_k = X_k.mean(axis=0) if n_k > 0 else np.zeros(3)
             planarity_k = float("nan")
             winding_k, n_valid_trans, n_total_trans = float("nan"), 0, max(0, n_k - 1)
 
-        # Anchors (in the first 3 dimensions)
-        c3 = center_k[:3] if len(center_k) >= 3 else np.pad(center_k, (0, 3 - len(center_k)))
-        a0 = x0_arr[k] - c3
-        a90 = x90_arr[k] - c3
+        # Anchors
+        a0 = x0_arr[k] - center_k
+        a90 = x90_arr[k] - center_k
         anchor_norm_k = float(np.linalg.norm(a0))
         a90_norm = float(np.linalg.norm(a90))
         eps = 1e-12
@@ -407,8 +481,8 @@ def score_epoch_geometry(
     # Combine into total_score.  anchor_norm is not naturally in [0, 1] — we
     # normalize by the movement scale (median distance from median), so that
     # a full-radius anchor scores ~1.
-    med = np.median(X_arr[:, :3], axis=0)
-    dists = np.linalg.norm(X_arr[:, :3] - med, axis=1)
+    med = np.median(X_arr, axis=0)
+    dists = np.linalg.norm(X_arr - med, axis=1)
     R = float(np.median(dists))
     if not np.isfinite(R) or R < 1e-9:
         R = float(np.sqrt(np.mean(dists**2)))
@@ -467,6 +541,59 @@ def score_epoch_geometry(
     }
 
 
+class _ScoredCandidate(NamedTuple):
+    """One scored (period, offset) candidate, kept around only long enough
+    to run selection -- see ``_select_best_candidate``."""
+    n_cycles: int
+    total_score: float
+    period: float
+    offset: float
+    epochs: "CycleEpochs"
+    meta: dict
+    winding_valid: bool
+
+
+def _select_best_candidate(
+    candidate_pool: list, score_tolerance: float,
+) -> Optional[_ScoredCandidate]:
+    """
+    Deterministic compound-ordering selection among already winding-valid
+    (or, if ``require_winding_valid=False``, all scoreable) candidates.
+
+    Priority, in order:
+
+    1. Candidate must already be in ``candidate_pool`` (validity filtering
+       -- winding validity, ``n_cycles >= 2``, scoreable at all -- happens
+       in the caller, before this function ever sees a candidate).
+    2. Candidate must fall within ``score_tolerance`` of the best
+       ``total_score`` achieved by any candidate in the pool.
+    3. Among those, prefer more complete cycles (``n_cycles``) -- see
+       :func:`find_epochs_by_geometric_score`'s Notes for why this,
+       specifically, is the tie-break ``score_tolerance`` exists to apply.
+    4. Among equal cycle counts, prefer the higher ``total_score`` (not
+       "whichever the search happened to visit first with that cycle
+       count" -- the previous ``max(..., key=lambda c: c[0])`` picked
+       Python's ``max`` first-occurrence winner on cycle count alone,
+       which is input-order-dependent whenever two candidates tie on
+       ``n_cycles`` but differ in score).
+    5. If *still* tied (identical ``n_cycles`` and ``total_score``, e.g. a
+       perfectly symmetric candidate shape with no true preferred phase
+       offset), break the tie deterministically and reproducibly by
+       preferring the smaller ``period``, then the smaller ``offset`` --
+       arbitrary but fixed, so the result never depends on
+       ``period_candidates``' input order or iteration order.
+
+    Returns ``None`` if ``candidate_pool`` is empty.
+    """
+    if not candidate_pool:
+        return None
+    best_score = max(c.total_score for c in candidate_pool)
+    threshold = best_score - score_tolerance
+    qualified = [c for c in candidate_pool if c.total_score >= threshold]
+    # qualified always contains at least the best-score candidate(s).
+    return max(qualified, key=lambda c: (c.n_cycles, c.total_score, -c.period, -c.offset))
+
+
 def find_epochs_by_geometric_score(
     X,
     sampling_rate_hz: float,
@@ -486,8 +613,9 @@ def find_epochs_by_geometric_score(
 
     Parameters
     ----------
-    X : array-like or DataFrame, shape (n_time, n_features)
-        Multivariate trajectory.
+    X : array-like or DataFrame, shape (n_time, 3)
+        Multivariate trajectory.  Requires exactly 3 features -- see
+        :func:`score_epoch_geometry`.
     sampling_rate_hz : float
         Sampling rate in Hz.
     period_candidates : list of :class:`PeriodCandidate`
@@ -503,9 +631,12 @@ def find_epochs_by_geometric_score(
         Candidate-*selection* tolerance, not a scoring change (see Notes).
         Absolute ``total_score`` tolerance below the best score achieved by
         any *winding-valid* candidate; among candidates within this
-        tolerance of the best, the one with the most complete cycles
-        (``n_cycles``) wins, instead of the single highest-scoring
-        candidate outright.
+        tolerance of the best, selection uses a fully deterministic
+        compound order (see :func:`_select_best_candidate`): most complete
+        cycles first, then highest ``total_score``, then smaller period,
+        then smaller offset -- so the result never depends on
+        ``period_candidates``' input order, even when candidates are
+        exactly tied.
     winding_valid_min, winding_valid_max : float
         Range of ``abs(winding)`` (see :func:`score_epoch_geometry`) counted
         as "approximately one lap" for a single cycle.
@@ -601,16 +732,38 @@ def find_epochs_by_geometric_score(
     high-``n_cycles``, low-quality candidate the way a raw coverage filter
     would be.
     """
+    # Validate every global argument once, up front, before the search loop
+    # -- not because any individual call inside the loop wouldn't itself
+    # eventually raise on a bad value, but because relying on that means a
+    # bad argument (invalid weights, a nonsensical winding range) surfaces
+    # only after that specific per-candidate try/except below decides
+    # whether to propagate it, which is exactly the failure mode this
+    # function used to have: a plain `except ValueError` around the
+    # per-candidate score call caught *everything*, including config
+    # errors, and reported them as "no candidate produced enough cycles" --
+    # a real bug indistinguishable from an ordinary degenerate candidate.
+    # Validating here means a bad global argument always raises immediately
+    # and unambiguously, before any candidate is even attempted.
     X_arr = _resolve_X_and_columns(X, columns)
     fs = float(sampling_rate_hz)
     if fs <= 0:
         raise ValueError(f"sampling_rate_hz must be positive, got {fs}.")
     if not period_candidates:
         raise ValueError("period_candidates is empty.")
+    _normalize_score_weights(weights)  # raises if invalid; result unused here
+    if winding_valid_min > winding_valid_max:
+        raise ValueError(
+            f"winding_valid_min ({winding_valid_min}) must not exceed "
+            f"winding_valid_max ({winding_valid_max})."
+        )
+    if not (0.0 <= winding_min_fraction <= 1.0):
+        raise ValueError(
+            f"winding_min_fraction must be in [0, 1], got {winding_min_fraction}."
+        )
     n_time = X_arr.shape[0]
 
     rows = []
-    scored_candidates = []  # (n_cycles, total_score, epochs, meta, winding_valid)
+    scored_candidates: list[_ScoredCandidate] = []
 
     for cand in period_candidates:
         period = float(cand.period)
@@ -618,8 +771,9 @@ def find_epochs_by_geometric_score(
             continue
         offsets = np.linspace(0.0, period, n_phase_offsets, endpoint=False)
         for offset in offsets:
+            offset = float(offset)
             epochs = candidate_epochs_from_period_offset(
-                period, float(offset),
+                period, offset,
                 sampling_rate_hz=fs, n_time=n_time,
                 source="geometric_score_candidate",
                 metadata={"candidate_source": cand.source, "candidate_score": cand.score},
@@ -631,7 +785,7 @@ def find_epochs_by_geometric_score(
                     X_arr, epochs, sampling_rate_hz=fs, columns=None, weights=weights,
                     winding_valid_min=winding_valid_min, winding_valid_max=winding_valid_max,
                 )
-            except ValueError:
+            except AnchorOutOfBoundsError:
                 # A degenerate candidate (typically a harmonic-halved period
                 # close to period_search's min_period floor) can produce a
                 # cycle short enough that its quarter-cycle anchor time
@@ -640,12 +794,14 @@ def find_epochs_by_geometric_score(
                 # extrapolate there. Such a candidate simply cannot be
                 # scored; skip it rather than let one bad candidate crash
                 # the whole search. This does not change total_score for
-                # any candidate that *can* be scored.
+                # any candidate that *can* be scored. Only this specific,
+                # expected per-candidate failure is caught -- anything else
+                # (bad weights, a real bug) propagates normally.
                 continue
             winding_valid = score["fraction_single_lap_cycles"] >= winding_min_fraction
             rows.append({
                 "period": period,
-                "offset": float(offset),
+                "offset": offset,
                 "n_cycles": score["n_cycles"],
                 "total_score": score["total_score"],
                 "planarity": score["planarity"],
@@ -661,18 +817,20 @@ def find_epochs_by_geometric_score(
                 "fraction_single_lap_cycles": score["fraction_single_lap_cycles"],
                 "winding_valid": winding_valid,
             })
-            scored_candidates.append((
-                score["n_cycles"],
-                score["total_score"],
-                epochs,
-                {
+            scored_candidates.append(_ScoredCandidate(
+                n_cycles=score["n_cycles"],
+                total_score=score["total_score"],
+                period=period,
+                offset=offset,
+                epochs=epochs,
+                meta={
                     "period": period,
-                    "offset": float(offset),
+                    "offset": offset,
                     "total_score": score["total_score"],
                     "candidate_source": cand.source,
                     "fraction_single_lap_cycles": score["fraction_single_lap_cycles"],
                 },
-                winding_valid,
+                winding_valid=winding_valid,
             ))
 
     table = pd.DataFrame(
@@ -688,18 +846,13 @@ def find_epochs_by_geometric_score(
     )
 
     if require_winding_valid:
-        candidate_pool = [c for c in scored_candidates if c[4]]
+        candidate_pool = [c for c in scored_candidates if c.winding_valid]
     else:
         candidate_pool = scored_candidates
 
-    best_epochs: Optional[CycleEpochs] = None
-    best_meta = None
-    if candidate_pool:
-        best_score = max(total_score for _, total_score, _, _, _ in candidate_pool)
-        threshold = best_score - score_tolerance
-        qualified = [c for c in candidate_pool if c[1] >= threshold]
-        # qualified always contains at least the best-score candidate(s).
-        _, _, best_epochs, best_meta, _ = max(qualified, key=lambda c: c[0])
+    winner = _select_best_candidate(candidate_pool, score_tolerance)
+    best_epochs = winner.epochs if winner is not None else None
+    best_meta = winner.meta if winner is not None else None
 
     if best_epochs is None:
         if scored_candidates:

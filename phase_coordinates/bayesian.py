@@ -26,7 +26,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import find_peaks, periodogram
 
-from .epochs import CycleEpochs, epochs_from_boundary_indices
+from .epochs import CycleEpochs, cycle_index_from_tau, epochs_from_boundary_indices
 from .geometry import (
     interp_X_at_times,
     oriented_frame_from_anchors,
@@ -157,6 +157,13 @@ def _complete_endpoint_peak(ref_signal, peaks, fs, T0, *, side, tolerance_frac=0
     already available (expected spacing from ``T0``, neighboring peak
     locations, and the reference signal's own endpoint behavior), not an
     unconditional assumption that a boundary belongs there.
+
+    The search window is a fixed-radius interval *centered on the predicted
+    location* (``tolerance_frac`` of the period on each side), clipped to
+    the signal extent and to not cross the reference peak it's completing
+    from -- not "0 (or the array end) all the way to near the prediction",
+    which would let an unrelated, stronger maximum anywhere in that wide
+    range win over the actual predicted peak.
     """
     n = len(ref_signal)
     period_samples = T0 * fs
@@ -166,14 +173,14 @@ def _complete_endpoint_peak(ref_signal, peaks, fs, T0, *, side, tolerance_frac=0
         expected = peaks[0] - period_samples
         if expected < 0:
             return None
-        lo = 0
+        lo = max(0, int(round(expected - search_radius)))
         hi = min(peaks[0], int(round(expected + search_radius)) + 1)
     else:
         expected = peaks[-1] + period_samples
         if expected > n - 1:
             return None
         lo = max(peaks[-1] + 1, int(round(expected - search_radius)))
-        hi = n
+        hi = min(n, int(round(expected + search_radius)) + 1)
 
     if hi <= lo:
         return None
@@ -193,22 +200,26 @@ def seed_boundary_indices(ref_signal, fs, T0):
     ``scipy.signal.find_peaks`` can never report a peak at index 0 or the
     last index (a peak requires a neighbor on both sides), so a genuine
     cycle boundary that coincides with the start or end of the recording is
-    otherwise silently lost. After the initial peak search, this makes one
-    bounded attempt on each side to complete such an edge peak using the
-    estimated period and the reference signal's own local shape (see
-    :func:`_complete_endpoint_peak`); it adds nothing if there isn't room
-    for a full extra cycle or the data at that location doesn't actually
-    look like a peak.
+    otherwise silently lost. Endpoint completion (see
+    :func:`_complete_endpoint_peak`) is attempted *before* the minimum-count
+    check below, not after: a short recording with only 2 interior peaks
+    plus 2 genuine, recoverable endpoint peaks has enough evidence for 3
+    complete cycles, but would have been rejected outright by the old
+    ordering (which raised on "fewer than 3 peaks" before endpoint
+    completion ever got a chance to help). Completion adds nothing if
+    there isn't room for a full extra cycle or the data at that location
+    doesn't actually look like a peak.
 
     Returns integer sample indices ``tau_idx`` (length ``K``), defining
     ``K - 1`` candidate cycles.
     """
     distance = max(1, int(0.6 * T0 * fs))
     peaks, _ = find_peaks(ref_signal, distance=distance)
-    if len(peaks) < 3:
+    if len(peaks) == 0:
         raise ValueError(
-            "Could not detect at least 3 boundary events (>= 2 complete "
-            "cycles) from the data. Provide a longer / cleaner recording."
+            "Could not detect any boundary events from the data (no peaks "
+            "found in the reference signal). Provide a longer / cleaner "
+            "recording."
         )
 
     peaks = list(peaks)
@@ -219,7 +230,16 @@ def seed_boundary_indices(ref_signal, fs, T0):
     if extra_end is not None:
         peaks.append(extra_end)
 
-    return np.array(sorted(set(peaks)), dtype=int)
+    peaks = sorted(set(peaks))
+    if len(peaks) < 3:
+        raise ValueError(
+            "Could not detect at least 3 boundary events (>= 2 complete "
+            f"cycles) from the data, even after attempting endpoint "
+            f"completion (found {len(peaks)}). Provide a longer / cleaner "
+            "recording."
+        )
+
+    return np.array(peaks, dtype=int)
 
 
 def seed_cycle_centers(X, tau_idx):
@@ -1112,8 +1132,10 @@ def fit_bayesian_phase_coordinates(
     from .core import SAMPLE_COLUMNS, CYCLE_COLUMNS
 
     if isinstance(X, pd.DataFrame):
+        index = X.index
         X_arr = X[columns].to_numpy(dtype=float) if columns else X.to_numpy(dtype=float)
     else:
+        index = None
         X_arr = np.asarray(X, dtype=float)
 
     if X_arr.ndim != 2 or X_arr.shape[1] != 3:
@@ -1184,9 +1206,29 @@ def fit_bayesian_phase_coordinates(
     i1 = min(n_input_time - 1, int(np.floor(layer1.tau_mean[-1] * fs)))
 
     # ---- Build samples DataFrame ----
-    # Start with NaN-filled frame for all input samples
     all_sample_index = np.arange(n_input_time)
     all_time = all_sample_index / fs
+
+    # Cycle membership is derived once, over the full input window, from the
+    # same half-open [tau[k], tau[k+1)) rule every other constructor uses
+    # (see cycle_index_from_tau) -- an actual CycleEpochs, not a separately
+    # NaN-initialized float column. This gives the standard integer
+    # cycle_index with -1 outside [tau[0], tau[-1)) (matching the PCA path)
+    # instead of float NaN, and, like the PCA path, "cycle" reflects pure
+    # time membership regardless of whether Layer 2 actually produced a
+    # fitted geometry value there (that's a separate concern, handled below
+    # by fit_indices/n_use exactly as before).
+    bayesian_epochs = CycleEpochs(
+        tau=np.asarray(layer1.tau_mean, dtype=float),
+        duration=np.diff(layer1.tau_mean),
+        cycle_index=cycle_index_from_tau(layer1.tau_mean, all_time),
+        phase=None,
+        phase_in_cycle=None,
+        time=all_time,
+        source="bayesian_layer1",
+        metadata={"T0": T0},
+    )
+    cycle_full = bayesian_epochs.cycle_index
 
     # Fitted-window values
     phase_in_cycle_fit = np.mod(layer2.phase_mean, 2 * np.pi)
@@ -1194,12 +1236,13 @@ def fit_bayesian_phase_coordinates(
     v_fit = layer2.radius_mean * np.sin(phase_in_cycle_fit)
     theta_wrapped_fit = np.angle(np.exp(1j * phase_in_cycle_fit))
 
-    # Cycle membership for fitted window
-    cycle_idx_arr = np.searchsorted(layer1.tau_mean, layer2.time, side="right") - 1
-    cycle_idx_arr = np.clip(cycle_idx_arr, 0, K_cyc - 1).astype(int)
+    # Cycle membership specifically for layer2's own (possibly shorter, see
+    # below) time grid, used only for the per-cycle perp aggregate in the
+    # cycles table -- same shared half-open rule, not a separately
+    # clipped/reimplemented one.
+    cycle_idx_arr = cycle_index_from_tau(layer1.tau_mean, layer2.time)
 
     # Build full arrays (NaN outside window)
-    cycle_full = np.full(n_input_time, np.nan)
     phase_full = np.full(n_input_time, np.nan)
     phase_in_cycle_full = np.full(n_input_time, np.nan)
     u_full = np.full(n_input_time, np.nan)
@@ -1216,7 +1259,6 @@ def fit_bayesian_phase_coordinates(
     n_use = min(n_fit, len(layer2.time))
     fit_indices = np.arange(i0, i0 + n_use)
 
-    cycle_full[fit_indices] = cycle_idx_arr[:n_use]
     phase_full[fit_indices] = layer2.phase_mean[:n_use]
     phase_in_cycle_full[fit_indices] = phase_in_cycle_fit[:n_use]
     u_full[fit_indices] = u_fit[:n_use]
@@ -1238,7 +1280,7 @@ def fit_bayesian_phase_coordinates(
         "theta": theta_full,
         "theta_wrapped": theta_wrapped_full,
         "perp": perp_full,
-    })
+    }, index=index)
 
     # ---- Get R_k posterior stats from layer2 idata ----
     try:
@@ -1250,12 +1292,22 @@ def fit_bayesian_phase_coordinates(
         R_k_sd = np.zeros(K_cyc)
 
     # ---- Build cycles DataFrame ----
+    # sample_start/sample_stop come from the same CycleEpochs used for the
+    # samples table's "cycle" column above (bayesian_epochs), computed once
+    # here rather than per cycle. This replaces a separate ceil/floor+1
+    # computation that could include a sample landing exactly on a cycle
+    # boundary in *both* the closing cycle and the next one's opening
+    # cycle -- half-open assignment (like everywhere else in the package)
+    # means a boundary sample belongs to at most one cycle.
+    bayes_sample_start = bayesian_epochs.sample_start
+    bayes_sample_stop = bayesian_epochs.sample_stop
+
     cycle_rows = []
     for k in range(K_cyc):
         t_start_k = float(layer1.tau_mean[k])
         t_stop_k = float(layer1.tau_mean[k + 1])
-        s_start_k = max(0, int(np.ceil(t_start_k * fs)))
-        s_stop_k = min(n_input_time, int(np.floor(t_stop_k * fs)) + 1)
+        s_start_k = int(bayes_sample_start[k])
+        s_stop_k = int(bayes_sample_stop[k])
         duration_k = t_stop_k - t_start_k
         t_quarter_k = t_start_k + 0.25 * duration_k
         n_samples_k = s_stop_k - s_start_k

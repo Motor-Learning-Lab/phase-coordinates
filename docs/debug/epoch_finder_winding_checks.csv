@@ -1,8 +1,8 @@
 check,description,winding_median_abs,winding_min_abs,winding_max_abs,expected_abs_winding_range,expected_valid,actually_valid,passed
-true_period,period = 1x true period,0.9900000000000001,0.9900000000000001,0.9900000000000007,"(0.9, 1.1)",True,True,True
-multi_lap_2x,period = 2x true period,1.99,1.99,1.9900000000000007,"(1.8, 2.2)",False,False,True
-multi_lap_3x,period = 3x true period,2.99,2.99,2.9900000000000007,"(2.8, 3.2)",False,False,True
-fractional_lap_0.5x,period = 0.5x true period,0.673331249269305,0.673331249269305,0.6733312492693058,"(0.6, 0.75)",False,False,True
-mild_phase_warp,"true period, non-constant angular velocity",0.9882058836150922,0.9878262551414423,0.9914352556494147,"(0.9, 1.1)",True,True,True
-traversal_reversal,"same loop, reversed time order",0.9900000000000001,0.9899999999999999,0.9900000000000003,"(0.9, 1.1)",True,True,True
+true_period,period = 1x true period,1.0,1.0,1.0,"(0.9, 1.1)",True,True,True
+multi_lap_2x,period = 2x true period,2.0,2.0,2.0,"(1.8, 2.2)",False,False,True
+multi_lap_3x,period = 3x true period,3.0,3.0,3.0,"(2.8, 3.2)",False,False,True
+fractional_lap_0.5x,period = 0.5x true period,0.6804471411643226,0.6804471411643221,0.680447141164323,"(0.6, 0.75)",False,False,True
+mild_phase_warp,"true period, non-constant angular velocity",1.0000269993591027,0.9969798564947072,1.0027108832944123,"(0.9, 1.1)",True,True,True
+traversal_reversal,"same loop, reversed time order",1.0,0.9999999999999999,1.0,"(0.9, 1.1)",True,True,True
 traversal_reversal_sign,signed winding flips sign under time reversal,,,,,True,True,True

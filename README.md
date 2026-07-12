@@ -68,13 +68,34 @@ quality = compute_cycle_quality(X, epochs, sampling_rate_hz=fs)
 ```python
 from phase_coordinates import fit_bayesian_phase_coordinates, reconstruct_phase_coordinates
 
-# X: (n_time, 3) array; seed epochs are built internally from the data
+# X: (n_time, 3) array; seed epochs and T0 are both estimated internally
+# from the periodogram of X's dominant PCA reference signal.
 samples, cycles, details = fit_bayesian_phase_coordinates(X, sampling_rate_hz=100.0)
+```
 
-# Or pass explicit seed_epochs to inspect / override the seed path:
-# samples, cycles, details = fit_bayesian_phase_coordinates(
-#     X, sampling_rate_hz=100.0, seed_epochs=epochs,
-# )
+Pass explicit `seed_epochs` to inspect or override the seed path. If those
+epochs come from a source with its **own** period estimate that may differ
+from the periodogram's — e.g. the geometric-score search from Pattern 2 —
+pass that period as `T0` too, so Layer 1's boundary-timing prior is scaled
+to the seed's actual period instead of silently re-estimating a different
+one from the periodogram:
+
+```python
+from phase_coordinates import (
+    dominant_reference_signal,
+    period_candidates_from_periodogram,
+    find_epochs_by_geometric_score,
+    fit_bayesian_phase_coordinates,
+)
+
+ref = dominant_reference_signal(X)
+candidates = period_candidates_from_periodogram(ref, fs)
+epochs, table = find_epochs_by_geometric_score(X, fs, period_candidates=candidates)
+
+samples, cycles, details = fit_bayesian_phase_coordinates(
+    X, sampling_rate_hz=fs,
+    seed_epochs=epochs, T0=epochs.metadata["period"],
+)
 ```
 
 ## Shared outputs
@@ -162,6 +183,7 @@ samples, cycles, details = fit_bayesian_phase_coordinates(
     *,
     sampling_rate_hz,             # required
     seed_epochs=None,              # optional CycleEpochs; built internally if None
+    T0=None,                       # optional period in seconds; estimated internally if None
     columns=None,
     draws=1000,
     tune=1000,
@@ -173,6 +195,8 @@ samples, cycles, details = fit_bayesian_phase_coordinates(
 ```
 
 **Assumptions:** 3-D data only. Phase is estimated jointly with geometry using MCMC. The cycle-fixed frame uses an oriented basis derived from cycle-boundary anchor points.
+
+**When to pass `T0` explicitly:** `T0` scales Layer 1's boundary-timing prior and log-duration prior mean. Left as `None`, it's estimated from the periodogram of the dominant PCA reference signal — the same estimate used to build `seed_epochs` internally when that's also omitted. If you pass your **own** `seed_epochs` from a source with a different implied period (most notably `find_epochs_by_geometric_score`, whose result carries its winning period in `epochs.metadata["period"]`), pass that period as `T0` too. Otherwise Layer 1 silently mixes a seed built around one period with priors scaled to a different, periodogram-estimated one — exactly the hidden coupling `T0` exists to let you break.
 
 **details dict:**
 - `algorithm`: `"bayesian"`
@@ -227,7 +251,7 @@ Cycle identification (produces `CycleEpochs`):
 
 Coordinate estimation:
 - `fit_pca_phase_coordinates(X, *, epochs, columns=None, min_samples_per_cycle=10)` → `(samples, cycles, details)`
-- `fit_bayesian_phase_coordinates(X, *, sampling_rate_hz, seed_epochs=None, ...)` → `(samples, cycles, details)`
+- `fit_bayesian_phase_coordinates(X, *, sampling_rate_hz, seed_epochs=None, T0=None, ...)` → `(samples, cycles, details)`
 - `reconstruct_phase_coordinates(samples, cycles)` → `np.ndarray (n_time, 3)`
 
 Diagnostics:

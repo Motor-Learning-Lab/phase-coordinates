@@ -6,9 +6,12 @@ No PyMC required for any test in this file.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.decomposition import PCA
 
 from phase_coordinates import (
     CycleEpochs,
@@ -259,6 +262,94 @@ def test_score_epoch_geometry_finite_components():
     assert 0.9 < score["quarter_anchor_orth_ratio"] <= 1.0 + 1e-6
     assert score["n_cycles"] == epochs.n_cycles
     assert len(score["per_cycle"]) == epochs.n_cycles
+
+
+# ---------------------------------------------------------------------------
+# 10b. planarity definition and the exactly-3-dimensions contract
+# ---------------------------------------------------------------------------
+
+def _four_dim_circle_with_leftover_variance(rng=None):
+    """A circle confined to dims 0-1 plus two *comparably-sized*,
+    independent noise dimensions (2 and 3) -- deliberately not one tiny and
+    one large, so neither ends up negligible regardless of which one PCA
+    happens to label PC3 vs PC4 (their variances are equal by construction,
+    so that ordering is arbitrary / sample-noise-dependent; what matters is
+    that *both* carry real, non-trivial variance unrelated to the circle).
+
+    "1 - evr[2]" only ever excludes *one* of these two (whichever lands at
+    index 2), silently keeping the other as if it were part of the 2-D
+    plane -- the true 2-D-plane fraction is PC1+PC2 only.
+    """
+    rng = rng or np.random.default_rng(0)
+    n = 600
+    theta = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    X = np.column_stack([
+        np.cos(theta),
+        np.sin(theta),
+        rng.standard_normal(n) * 0.3,
+        rng.standard_normal(n) * 0.3,
+    ])
+    return X
+
+
+def test_planarity_old_definition_would_overcount_with_4d_input():
+    """Direct demonstration (not through the public API, which now rejects
+    4-D input -- see below) that the pre-fix `1 - evr[2]` definition is
+    wrong whenever more than 3 dimensions are fit: it only subtracts
+    whichever component lands at index 2, silently keeping any later
+    component (PC4 here) as if it were part of the 2-D plane, even though
+    PC4's variance here is by construction just as real and
+    circle-unrelated as PC3's."""
+    X = _four_dim_circle_with_leftover_variance()
+    pca = PCA(n_components=4)
+    pca.fit(X - X.mean(axis=0))
+    evr = pca.explained_variance_ratio_
+
+    old_buggy_planarity = 1.0 - evr[2]
+    correct_planarity = evr[0] + evr[1]
+
+    # The bug: old formula silently keeps PC4's share (evr[3]) as if it
+    # were part of the plane, so it reads measurably higher than the true
+    # 2-D-plane fraction -- by exactly evr[3], algebraically (evr sums to 1
+    # across all 4 fitted components: 1 - evr[2] = evr[0]+evr[1]+evr[3]).
+    assert old_buggy_planarity == pytest.approx(correct_planarity + evr[3])
+    assert old_buggy_planarity - correct_planarity > 0.03
+    assert old_buggy_planarity > 0.9
+    assert correct_planarity < old_buggy_planarity - 0.03
+
+
+def test_score_epoch_geometry_rejects_four_dimensional_input():
+    """The current code closes off the above bug entirely by requiring
+    exactly 3 dimensions -- rather than silently using only the first 3 for
+    anchor geometry while PCA planarity saw all of them (the inconsistency
+    that made the old formula's bug reachable in the first place)."""
+    X = _four_dim_circle_with_leftover_variance()
+    phase = np.linspace(0, 6 * np.pi, len(X))
+    epochs = identify_cycles_from_phase(phase, sampling_rate_hz=100.0)
+
+    with pytest.raises(ValueError, match="exactly 3"):
+        score_epoch_geometry(X, epochs, sampling_rate_hz=100.0)
+    with pytest.raises(ValueError, match="exactly 3"):
+        compute_cycle_quality(X, epochs, sampling_rate_hz=100.0)
+
+
+def test_score_epoch_geometry_planarity_matches_two_plane_variance():
+    """On valid (exactly-3-D) input, planarity must equal evr[0]+evr[1] --
+    algebraically identical to 1-evr[2] only because all 3 components are
+    fit (nothing left over to hide), which is exactly why enforcing exactly
+    3 dimensions is what makes "1 - PC3" a safe shorthand at all."""
+    X, phase, fs = _tilted_circle(n_cycles=4, samples_per_cycle=100, noise_std=0.02)
+    epochs = identify_cycles_from_phase(phase, sampling_rate_hz=fs)
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+
+    idx0 = np.where(epochs.cycle_index == 0)[0]
+    X0 = X[idx0]
+    pca = PCA(n_components=3)
+    pca.fit(X0 - X0.mean(axis=0))
+    evr = pca.explained_variance_ratio_
+    expected_planarity_0 = float(evr[0] + evr[1])
+
+    assert score["per_cycle"][0]["planarity"] == pytest.approx(expected_planarity_0, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +624,62 @@ def test_winding_single_clean_lap_is_accepted():
         assert 0.9 <= abs(c["winding"]) <= 1.1
 
 
+@pytest.mark.parametrize("samples_per_cycle", [3, 5, 10])
+def test_winding_low_samples_per_cycle_still_reads_one_revolution(samples_per_cycle):
+    """Without the closing-boundary anchor, summing only consecutive
+    recorded samples systematically undercounts by 1/n of a revolution: n
+    evenly-spaced samples spanning one clean lap (first sample at the start
+    boundary, last sample one slot short of the end boundary) would measure
+    (n-1)/n turns. At n=3 that's 2/3 ~= 0.667 -- below the default 0.75
+    validity floor purely from the missing segment, not any real defect.
+    The fix (interpolating the cycle's own end-boundary position and
+    closing the gap with it) must recover ~1 revolution regardless of n."""
+    fs = 100.0
+    period = 1.0
+    n_cycles = 4
+    n_time = n_cycles * samples_per_cycle + 1
+    t = np.arange(n_time) / (samples_per_cycle / period)
+    theta = 2 * np.pi * t / period
+    tilt = np.pi / 6
+    X = np.column_stack([
+        np.cos(theta), np.sin(theta) * np.cos(tilt), np.sin(theta) * np.sin(tilt),
+    ])
+    epochs = candidate_epochs_from_period_offset(
+        period, 0.0, sampling_rate_hz=samples_per_cycle / period, n_time=n_time,
+    )
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=samples_per_cycle / period)
+
+    assert score["winding_median_abs"] == pytest.approx(1.0, abs=0.02)
+    assert score["fraction_single_lap_cycles"] == 1.0
+
+
+def test_winding_closing_anchor_handles_boundary_between_sample_times():
+    """The end-boundary anchor is linearly interpolated, so it must close
+    the gap correctly even when a cycle boundary doesn't land exactly on a
+    recorded sample time (the common case for a real period estimate)."""
+    fs = 100.0
+    period = 0.965  # boundary lands strictly between sample 96 and 97
+    n_time = 600
+    t = np.arange(n_time) / fs
+    theta = 2 * np.pi * t / period
+    tilt = np.pi / 6
+    X = np.column_stack([
+        np.cos(theta), np.sin(theta) * np.cos(tilt), np.sin(theta) * np.sin(tilt),
+    ])
+    epochs = candidate_epochs_from_period_offset(period, 0.0, sampling_rate_hz=fs, n_time=n_time)
+    # tau[0] == 0.0 trivially sits on the sample grid (it's the window
+    # start, not a cycle-closing boundary); check the actual closing
+    # boundaries (tau[1:], each used as a cycle's end anchor) land strictly
+    # between samples, as intended by this test.
+    assert not np.any(np.isclose(epochs.tau[1:] % (1.0 / fs), 0.0, atol=1e-9)), (
+        "test setup error: a closing boundary landed exactly on a sample time"
+    )
+
+    score = score_epoch_geometry(X, epochs, sampling_rate_hz=fs)
+    assert score["winding_median_abs"] == pytest.approx(1.0, abs=0.01)
+    assert score["fraction_single_lap_cycles"] == 1.0
+
+
 @pytest.mark.parametrize("multiplier,expected_abs_winding", [(2.0, 2.0), (3.0, 3.0)])
 def test_winding_multi_lap_candidates_are_rejected(multiplier, expected_abs_winding):
     """A period that's an exact integer multiple of the true one retraces
@@ -647,7 +794,6 @@ def test_winding_mostly_degenerate_cycle_is_undefined_not_silently_valid():
     definition, mean(90 copies of arc_mean + those 10 points) works out to
     exactly arc_mean again -- i.e. the collapsed points land exactly on the
     true center by construction, algebraically, not by trial and error."""
-    from sklearn.decomposition import PCA
     from phase_coordinates.scoring import _cycle_winding
 
     n = 100
@@ -705,3 +851,468 @@ def test_require_winding_valid_false_falls_back_to_score_tolerance_only():
     score_filtered = score_epoch_geometry(X, epochs_filtered, sampling_rate_hz=fs)
     assert score_filtered["fraction_single_lap_cycles"] >= 0.8
     assert epochs_no_filter.n_cycles >= 2
+
+
+# ---------------------------------------------------------------------------
+# 17. CycleEpochs.sample_start / sample_stop: vectorized, no repeated
+#     recomputation
+# ---------------------------------------------------------------------------
+
+def _make_epochs(tau, cycle_index, time):
+    tau = np.asarray(tau, dtype=float)
+    return CycleEpochs(
+        tau=tau,
+        duration=np.diff(tau),
+        cycle_index=np.asarray(cycle_index, dtype=int),
+        phase=None,
+        phase_in_cycle=None,
+        time=np.asarray(time, dtype=float),
+        source="test",
+    )
+
+
+def test_sample_bounds_empty_cycle_in_the_middle():
+    """A cycle with zero assigned samples, sandwiched between two non-empty
+    ones, must report sample_start == sample_stop pointing at the first
+    sample index at-or-after its own tau[k] -- not corrupt its neighbors'
+    bounds. This is the case the vectorized single-pass implementation must
+    get right, not just the prefix/suffix -1 edges."""
+    tau = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+    cycle_index = np.concatenate([
+        np.repeat(0, 50), np.repeat(1, 50), np.repeat(2, 50),
+        # cycle 3 has no samples at all
+        np.repeat(4, 50), np.repeat(5, 50),
+    ])
+    time = np.arange(len(cycle_index)) / 100.0
+    epochs = _make_epochs(tau, cycle_index, time)
+
+    starts = epochs.sample_start
+    stops = epochs.sample_stop
+
+    np.testing.assert_array_equal(starts[[0, 1, 2, 4, 5]], [0, 50, 100, 150, 200])
+    np.testing.assert_array_equal(stops[[0, 1, 2, 4, 5]], [50, 100, 150, 200, 250])
+    # Empty cycle 3: start == stop, pointing at the first sample at-or-after
+    # tau[3] == 1.5s == sample index 150 (the same sample cycle 4 starts at).
+    assert starts[3] == stops[3] == 150
+
+
+def test_sample_bounds_all_cycles_empty():
+    tau = np.array([20.0, 21.0, 22.0, 23.0])  # 3 cycles, entirely after the data
+    time = np.array([10.0, 10.01, 10.02])
+    cycle_index = np.full(3, -1)
+    epochs = _make_epochs(tau, cycle_index, time)
+
+    starts = epochs.sample_start
+    stops = epochs.sample_stop
+    np.testing.assert_array_equal(starts, stops)
+    # All three tau values are past the end of the (unrelated) time array,
+    # so the "smallest sample index at-or-after tau[k]" placeholder is
+    # clamped to len(time) for each.
+    np.testing.assert_array_equal(starts, [3, 3, 3])
+
+
+def test_sample_bounds_matches_naive_per_cycle_scan():
+    """Cross-check the vectorized implementation against a direct
+    (obviously correct, if slow) per-cycle np.where scan, on a case with
+    prefix/suffix -1 padding and single-sample cycles."""
+    tau = np.arange(7) * 1.0
+    cycle_index = np.concatenate([
+        np.full(20, -1),
+        np.repeat(np.arange(6), 100),
+        np.full(15, -1),
+    ])
+    time = np.arange(len(cycle_index)) / 100.0
+    epochs = _make_epochs(tau, cycle_index, time)
+
+    K = epochs.n_cycles
+    naive_starts = np.zeros(K, dtype=int)
+    naive_stops = np.zeros(K, dtype=int)
+    for k in range(K):
+        hit = np.where(epochs.cycle_index == k)[0]
+        naive_starts[k] = int(hit[0])
+        naive_stops[k] = int(hit[-1]) + 1
+
+    np.testing.assert_array_equal(epochs.sample_start, naive_starts)
+    np.testing.assert_array_equal(epochs.sample_stop, naive_stops)
+
+
+def test_fit_pca_does_not_recompute_sample_bounds_per_cycle():
+    """fit_pca_phase_coordinates must access epochs.sample_start /
+    epochs.sample_stop a bounded, constant number of times (cached once
+    before the cycle loop), not once per cycle -- verified by counting
+    property accesses directly rather than timing, which would be brittle."""
+    X, phase, fs = _tilted_circle(n_cycles=6, samples_per_cycle=100)
+    epochs = identify_cycles_from_phase(phase, sampling_rate_hz=fs)
+    K = epochs.n_cycles
+    assert K >= 4, "need multiple cycles for this test to be meaningful"
+
+    call_counts = {"sample_start": 0, "sample_stop": 0}
+    orig_start = CycleEpochs.sample_start.fget
+    orig_stop = CycleEpochs.sample_stop.fget
+
+    def counting_start(self):
+        call_counts["sample_start"] += 1
+        return orig_start(self)
+
+    def counting_stop(self):
+        call_counts["sample_stop"] += 1
+        return orig_stop(self)
+
+    with mock.patch.object(CycleEpochs, "sample_start", property(counting_start)), \
+         mock.patch.object(CycleEpochs, "sample_stop", property(counting_stop)):
+        fit_pca_phase_coordinates(X, epochs=epochs)
+
+    # A pre-fix implementation that indexes epochs.sample_start[cyc_k]
+    # inside the per-cycle loop would access each property K (>=4) times;
+    # caching once before the loop means O(1) accesses regardless of K.
+    assert call_counts["sample_start"] < K, (
+        f"sample_start accessed {call_counts['sample_start']} times for "
+        f"K={K} cycles -- looks like it's being recomputed per cycle"
+    )
+    assert call_counts["sample_stop"] < K, (
+        f"sample_stop accessed {call_counts['sample_stop']} times for "
+        f"K={K} cycles -- looks like it's being recomputed per cycle"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18. cycle_index_from_tau: shared half-open boundary-assignment helper
+#     (used by epochs_from_boundary_indices, candidate_epochs_from_period_offset,
+#     and fit_bayesian_phase_coordinates's output construction)
+# ---------------------------------------------------------------------------
+
+def test_cycle_index_from_tau_boundary_exactly_on_sample_time():
+    """A boundary exactly on a sample time must not double-assign that
+    sample: it belongs to the cycle starting there, not the one ending
+    there (half-open [tau[k], tau[k+1)))."""
+    from phase_coordinates.epochs import cycle_index_from_tau
+
+    fs = 100.0
+    tau = np.array([0.0, 1.0, 2.0])  # boundary at exactly t=1.0s = sample 100
+    time = np.arange(200) / fs
+
+    ci = cycle_index_from_tau(tau, time)
+
+    assert ci[99] == 0    # last sample of cycle 0, just before the boundary
+    assert ci[100] == 1   # the boundary sample itself belongs to cycle 1
+    assert ci[199] == 1
+    # No sample is claimed by both cycles.
+    assert np.sum(ci == 0) + np.sum(ci == 1) == np.sum(ci >= 0)
+
+
+def test_cycle_index_from_tau_boundary_between_sample_times():
+    """A boundary that doesn't land on any sample time assigns every
+    sample unambiguously to whichever side its own time falls on."""
+    from phase_coordinates.epochs import cycle_index_from_tau
+
+    fs = 100.0
+    tau = np.array([0.0, 1.005, 2.0])  # boundary between samples 100 and 101
+    time = np.arange(200) / fs
+
+    ci = cycle_index_from_tau(tau, time)
+
+    assert ci[100] == 0   # t=1.00s < 1.005s
+    assert ci[101] == 1   # t=1.01s >= 1.005s
+
+
+def test_cycle_index_from_tau_fitted_window_edges():
+    """Samples before tau[0] or at/after tau[-1] are unassigned (-1),
+    including exactly-on-the-edge cases."""
+    from phase_coordinates.epochs import cycle_index_from_tau
+
+    fs = 100.0
+    tau = np.array([0.5, 1.5])  # window starts/ends mid-array
+    time = np.arange(200) / fs
+
+    ci = cycle_index_from_tau(tau, time)
+
+    assert ci[49] == -1    # t=0.49s, just before tau[0]
+    assert ci[50] == 0     # t=0.50s, exactly at tau[0] -- included
+    assert ci[149] == 0    # t=1.49s, just before tau[-1]
+    assert ci[150] == -1   # t=1.50s, exactly at tau[-1] -- excluded (half-open)
+
+
+def test_cycle_index_from_tau_zero_cycles():
+    from phase_coordinates.epochs import cycle_index_from_tau
+
+    ci = cycle_index_from_tau(np.array([1.0]), np.arange(10) / 10.0)
+    np.testing.assert_array_equal(ci, np.full(10, -1))
+
+
+def test_cycle_index_from_tau_matches_epochs_from_boundary_indices():
+    """The shared helper must produce exactly the cycle_index that
+    epochs_from_boundary_indices already returns -- confirms the refactor
+    to share implementation didn't change externally-visible behavior."""
+    fs = 100.0
+    n_time = 400
+    tau_idx = np.array([0, 100, 200, 300, 400], dtype=int)
+    epochs = epochs_from_boundary_indices(tau_idx, sampling_rate_hz=fs, n_time=n_time)
+
+    from phase_coordinates.epochs import cycle_index_from_tau
+    expected = cycle_index_from_tau(tau_idx.astype(float) / fs, np.arange(n_time) / fs)
+
+    np.testing.assert_array_equal(epochs.cycle_index, expected)
+
+
+# ---------------------------------------------------------------------------
+# 19. Deterministic compound-ordering selection
+# ---------------------------------------------------------------------------
+
+def _dummy_epochs(tag):
+    """A minimal, valid, distinguishable CycleEpochs for _select_best_candidate
+    unit tests -- the actual geometry is irrelevant, only object identity
+    (via metadata) matters for these tests."""
+    return CycleEpochs(
+        tau=np.array([0.0, 1.0, 2.0]),
+        duration=np.array([1.0, 1.0]),
+        cycle_index=np.array([0, 1]),
+        phase=None, phase_in_cycle=None,
+        time=np.array([0.5, 1.5]),
+        source="test", metadata={"tag": tag},
+    )
+
+
+def test_select_best_candidate_prefers_more_cycles_then_score_then_smaller_period_offset():
+    from phase_coordinates.scoring import _ScoredCandidate, _select_best_candidate
+
+    # A scores best outright, but B is within score_tolerance of A's score
+    # and has more cycles -- B should win (this is exactly the mechanism
+    # score_tolerance exists for).
+    pool = [
+        _ScoredCandidate(n_cycles=5, total_score=0.9, period=1.0, offset=0.0,
+                          epochs=_dummy_epochs("A"), meta={"tag": "A"}, winding_valid=True),
+        _ScoredCandidate(n_cycles=6, total_score=0.899, period=1.0, offset=0.0,
+                          epochs=_dummy_epochs("B"), meta={"tag": "B"}, winding_valid=True),
+    ]
+    winner = _select_best_candidate(pool, score_tolerance=0.01)
+    assert winner.meta["tag"] == "B"
+
+    # Same pair, but B's score is now far below A's -- outside the
+    # tolerance band, so B is never even considered despite more cycles.
+    pool_far = [
+        _ScoredCandidate(n_cycles=5, total_score=0.9, period=1.0, offset=0.0,
+                          epochs=_dummy_epochs("A"), meta={"tag": "A"}, winding_valid=True),
+        _ScoredCandidate(n_cycles=6, total_score=0.1, period=1.0, offset=0.0,
+                          epochs=_dummy_epochs("B"), meta={"tag": "B"}, winding_valid=True),
+    ]
+    winner_far = _select_best_candidate(pool_far, score_tolerance=0.01)
+    assert winner_far.meta["tag"] == "A"
+
+
+def test_select_best_candidate_tie_break_is_order_independent():
+    """Two candidates tied on both n_cycles and total_score (within
+    tolerance) must resolve to the same winner regardless of which order
+    they appear in the pool -- smaller period wins, then smaller offset."""
+    from phase_coordinates.scoring import _ScoredCandidate, _select_best_candidate
+
+    low_period = _ScoredCandidate(
+        n_cycles=5, total_score=0.9, period=1.0, offset=0.2,
+        epochs=_dummy_epochs("low_period"), meta={"tag": "low_period"}, winding_valid=True,
+    )
+    high_period = _ScoredCandidate(
+        n_cycles=5, total_score=0.9, period=2.0, offset=0.1,
+        epochs=_dummy_epochs("high_period"), meta={"tag": "high_period"}, winding_valid=True,
+    )
+
+    winner_forward = _select_best_candidate([low_period, high_period], score_tolerance=0.001)
+    winner_reversed = _select_best_candidate([high_period, low_period], score_tolerance=0.001)
+
+    assert winner_forward.meta["tag"] == "low_period"
+    assert winner_reversed.meta["tag"] == "low_period"
+
+    # Now tie on period too -- smaller offset should win, order-independently.
+    low_offset = _ScoredCandidate(
+        n_cycles=5, total_score=0.9, period=1.0, offset=0.1,
+        epochs=_dummy_epochs("low_offset"), meta={"tag": "low_offset"}, winding_valid=True,
+    )
+    high_offset = _ScoredCandidate(
+        n_cycles=5, total_score=0.9, period=1.0, offset=0.5,
+        epochs=_dummy_epochs("high_offset"), meta={"tag": "high_offset"}, winding_valid=True,
+    )
+    assert _select_best_candidate(
+        [low_offset, high_offset], score_tolerance=0.001,
+    ).meta["tag"] == "low_offset"
+    assert _select_best_candidate(
+        [high_offset, low_offset], score_tolerance=0.001,
+    ).meta["tag"] == "low_offset"
+
+
+def test_find_epochs_by_geometric_score_winner_independent_of_candidate_order():
+    """End-to-end: reversing (and duplicating) the input period_candidates
+    list must not change which (period, offset) wins."""
+    from phase_coordinates import PeriodCandidate
+
+    X, phase, fs = _tilted_circle(n_cycles=4, samples_per_cycle=100, noise_std=0.01)
+    ref = dominant_reference_signal(X)
+    cands = period_candidates_from_periodogram(ref, fs, n_candidates=5)
+    cands = expand_period_harmonics(cands)
+
+    epochs_forward, _ = find_epochs_by_geometric_score(
+        X, fs, period_candidates=cands, n_phase_offsets=16,
+    )
+    epochs_reversed, _ = find_epochs_by_geometric_score(
+        X, fs, period_candidates=list(reversed(cands)), n_phase_offsets=16,
+    )
+
+    assert epochs_forward.metadata["period"] == epochs_reversed.metadata["period"]
+    assert epochs_forward.metadata["offset"] == epochs_reversed.metadata["offset"]
+    assert epochs_forward.n_cycles == epochs_reversed.n_cycles
+
+
+# ---------------------------------------------------------------------------
+# 20. Exception handling: skip individually-bad candidates, propagate
+#     everything else
+# ---------------------------------------------------------------------------
+
+def test_individually_degenerate_candidate_is_skipped_not_fatal():
+    """A single degenerate period candidate (here, one absurdly short --
+    its quarter-cycle anchor lands outside the data window, raising
+    AnchorOutOfBoundsError) must not kill the whole search when other,
+    genuine candidates are present."""
+    from phase_coordinates import PeriodCandidate
+
+    X, phase, fs = _tilted_circle(n_cycles=4, samples_per_cycle=100, noise_std=0.01)
+    candidates = [
+        PeriodCandidate(period=0.001, source="degenerate", score=1.0),  # far too short
+        PeriodCandidate(period=1.0, source="genuine", score=1.0),
+    ]
+    epochs, table = find_epochs_by_geometric_score(
+        X, fs, period_candidates=candidates, n_phase_offsets=16,
+    )
+    assert abs(float(epochs.metadata["period"]) - 1.0) < 0.1
+    # The degenerate candidate should have produced zero rows (skipped
+    # entirely, not merely scored badly); the genuine one should be present.
+    assert not (table["period"] == 0.001).any()
+    assert (table["period"] == 1.0).any()
+
+
+def test_invalid_weights_raise_immediately_not_masked_as_no_candidate():
+    """Invalid weights must raise the actual, specific error -- not get
+    caught inside the per-candidate loop and reported as a misleading
+    "no candidate produced enough cycles"/"no candidate satisfied winding
+    validity" failure."""
+    from phase_coordinates import PeriodCandidate
+
+    X, phase, fs = _tilted_circle(n_cycles=4, samples_per_cycle=100, noise_std=0.01)
+    candidates = [PeriodCandidate(period=1.0, source="genuine", score=1.0)]
+
+    with pytest.raises(ValueError, match="Score weights must sum to a positive value"):
+        find_epochs_by_geometric_score(
+            X, fs, period_candidates=candidates,
+            weights={"planarity": 0.0, "anchor_norm": 0.0, "quarter_anchor_orth_ratio": 0.0},
+        )
+
+
+def test_invalid_winding_range_raises_immediately():
+    from phase_coordinates import PeriodCandidate
+
+    X, phase, fs = _tilted_circle(n_cycles=4, samples_per_cycle=100, noise_std=0.01)
+    candidates = [PeriodCandidate(period=1.0, source="genuine", score=1.0)]
+
+    with pytest.raises(ValueError, match="winding_valid_min"):
+        find_epochs_by_geometric_score(
+            X, fs, period_candidates=candidates,
+            winding_valid_min=1.5, winding_valid_max=0.5,
+        )
+    with pytest.raises(ValueError, match="winding_min_fraction"):
+        find_epochs_by_geometric_score(
+            X, fs, period_candidates=candidates, winding_min_fraction=1.5,
+        )
+
+
+def test_anchor_out_of_bounds_error_is_a_value_error_subclass():
+    """AnchorOutOfBoundsError must remain catchable by existing code that
+    catches the broader ValueError, even though find_epochs_by_geometric_score
+    itself now catches only the narrower type."""
+    from phase_coordinates.geometry import AnchorOutOfBoundsError
+    assert issubclass(AnchorOutOfBoundsError, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# 21. seed_boundary_indices: endpoint completion ordering and bounded
+#     search windows
+# ---------------------------------------------------------------------------
+
+def test_seed_boundary_indices_two_interior_plus_two_endpoint_peaks_give_three_cycles():
+    """A short recording with only 2 interior peaks, plus 2 genuine
+    endpoint peaks recoverable only via completion, has enough evidence for
+    3 complete cycles -- this must succeed, not raise on "fewer than 3
+    peaks" before completion gets a chance to run (the old ordering bug)."""
+    fs = 100.0
+    T0 = 1.0
+    n = 301  # samples 0..300 -> true peaks of cos at 0, 100, 200, 300
+    t = np.arange(n) / fs
+    ref = np.cos(2 * np.pi * t / T0)
+
+    # Sanity-check the premise: raw find_peaks only sees the 2 interior ones.
+    from scipy.signal import find_peaks as _find_peaks
+    raw_peaks, _ = _find_peaks(ref, distance=max(1, int(0.6 * T0 * fs)))
+    np.testing.assert_array_equal(raw_peaks, [100, 200])
+
+    tau_idx = seed_boundary_indices(ref, fs, T0)
+    np.testing.assert_array_equal(tau_idx, [0, 100, 200, 300])
+    assert len(tau_idx) - 1 == 3  # 3 complete cycles
+
+
+def test_seed_boundary_indices_raises_only_after_attempting_completion():
+    """A single, isolated peak with nothing recoverable on either side
+    (no room for a full extra cycle) must still raise -- but the message
+    should reflect that completion was already attempted."""
+    fs = 100.0
+    T0 = 1.0
+    n = 150  # only one interior peak fits; not enough room to complete
+    t = np.arange(n) / fs
+    ref = np.cos(2 * np.pi * t / T0)
+
+    with pytest.raises(ValueError, match="even after attempting endpoint completion"):
+        seed_boundary_indices(ref, fs, T0)
+
+
+def test_complete_endpoint_peak_ignores_unrelated_maximum_outside_search_window():
+    """A much larger local maximum that sits outside the bounded search
+    window (but would have been inside the old, unbounded window) must not
+    be picked -- only candidates near the predicted location are considered."""
+    from phase_coordinates.bayesian import _complete_endpoint_peak
+
+    fs = 100.0
+    T0 = 1.0  # period_samples = 100, search_radius = round(0.15*100) = 15
+    n = 500
+    ref = np.zeros(n)
+    peaks = [100, 200]  # as if find_peaks already found these
+
+    # Genuine, modest local peak near the predicted end-completion location
+    # (expected = 200 + 100 = 300), well inside the new bounded window
+    # [285, 316).
+    ref[295:306] = [0, 0.3, 0.6, 0.9, 1.0, 1.0, 1.0, 0.9, 0.6, 0.3, 0]
+
+    # Unrelated, much taller local maximum far outside the new bounded
+    # window but still within the *old* unbounded search range
+    # [peaks[-1]+1, n) = [201, 500).
+    ref[395:406] = [0, 3, 6, 9, 10, 10, 10, 9, 6, 3, 0]
+
+    result = _complete_endpoint_peak(ref, peaks, fs, T0, side="end")
+
+    assert result is not None
+    assert 285 <= result < 316, f"expected within the bounded window, got {result}"
+
+
+def test_complete_endpoint_peak_start_side_ignores_unrelated_maximum():
+    """Same as above, mirrored for the start side."""
+    from phase_coordinates.bayesian import _complete_endpoint_peak
+
+    fs = 100.0
+    T0 = 1.0
+    n = 500
+    ref = np.zeros(n)
+    peaks = [400, 300]  # order doesn't matter to this helper; peaks[0]=400
+
+    # expected = peaks[0] - period_samples = 400 - 100 = 300 -- but we've
+    # deliberately made peaks[0]=400 to predict a start-completion near 300,
+    # well clear of an unrelated maximum near sample 50.
+    ref[295:306] = [0, 0.3, 0.6, 0.9, 1.0, 1.0, 1.0, 0.9, 0.6, 0.3, 0]
+    ref[45:56] = [0, 3, 6, 9, 10, 10, 10, 9, 6, 3, 0]
+
+    result = _complete_endpoint_peak(ref, peaks, fs, T0, side="start")
+
+    assert result is not None
+    assert 285 <= result < 316, f"expected within the bounded window, got {result}"

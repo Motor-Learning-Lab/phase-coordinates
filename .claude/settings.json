@@ -7,8 +7,7 @@
       "Bash(git -C * log *)",
       "Bash(git -C * diff *)",
       "Bash(git -C * branch *)",
-      "Bash(git -C * worktree *)",
-      "Bash(/home/opher/Repositories/phase-coordinates/.pixi/envs/default/bin/pytest *)"
+      "Bash(git -C * worktree *)"
     ]
   }
 }
