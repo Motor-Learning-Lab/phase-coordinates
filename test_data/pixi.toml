@@ -1,0 +1,45 @@
+[project]
+authors = ["Noam Gonen <noamgone@post.bgu.ac.il>", "Opher Donchin <donchin@bgu.ac.il>"]
+channels = ["conda-forge"]
+name = "gorilla_tag_environment"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+arviz = "*"
+pymc = "*"
+python = "*"
+ipython = "*"
+ipykernel = "*"
+ipywidgets = "*"
+ipympl = "*"
+graphviz = "*"
+notebook = "*"
+matplotlib = "*"
+numpy = "*"
+numba = "*"
+scipy = "*"
+pandas = "*"
+xarray = "*"
+pip = "*"
+pydot = "*"
+nbconvert = "*"
+jupytext = "*"
+networkx = "*"
+pymc-extras = "0.2.4.*"
+seaborn = ">=0.13.2,<0.14"
+hmmlearn = ">=0.3.3,<0.4"
+ffmpeg = { version = ">=7.1.1,<8", channel = "conda-forge" }
+kedro = ">=1.0.0,<2"
+kineticstoolkit = ">=0.17.0,<0.18"
+
+[pypi-dependencies]
+bambi = "*"
+kulprit = "*"
+nutpie = "*"
+preliz = "*"
+threadpoolctl = "*"
+bvhtoolbox = "*"
+keypoint-moseq = "*"
