@@ -147,7 +147,55 @@ operational-decisions section, commits should happen after every stage) —
 this stage's files are uncommitted on disk, same as Stage 2's.
 
 ## Stage 4+5 — Plane geometry / radius/perp + drift & variability
-Status: NOT STARTED
+Status: DONE
+
+Built `03_geometry_and_drift.ipynb`, reading only Stage 2's cache — nothing
+refit. 14 figures saved to `figures/`.
+
+**Subphase 4a (plane geometry):** for each of the 6 primary blocks, first/
+middle/last fitted cycle drawn as a translucent PCA-plane patch (spanned by
+`e1`/`e2` over that cycle's observed `(u,v)` range) with the cycle's actual
+measured 3-D hand-relative-to-root points scattered on it
+(`stage4_plane_<skill>_day<day><part>.png`).
+
+**Subphase 4b (radius/perp/phase):** full-block (untruncated) time series of
+`radius`, `perp`, `phase_in_cycle` for all 6 primary blocks
+(`stage4_signals_*.png`).
+
+**Subphase 5a (within-block drift):** one combined 6-condition x 5-metric
+grid (`stage5_within_block_drift_grid.png`) — duration, center-distance-
+from-block-mean, normal-angular-deviation-from-block-mean, radius_mean,
+perp_mean, all vs. cycle index.
+
+**Subphase 5b (across-run, day 1 vs day 3):** using all 58 runs (not just
+the 6 primary blocks) as real bout-to-bout replicate data, per-run means of
+the same 5 metrics compared Day-1-start vs Day-3-end per skill
+(`stage5_across_run_day1_vs_day3.png`). **Real, consistent finding:** for
+every skill, Day 3 shows *lower* median duration, *lower* center-drift,
+*lower* normal-drift, and *lower* spread (std) in all of these than Day 1 —
+e.g. climb duration 1.09s→0.77s, walk center_dist spread 3.02→0.87, jump
+normal_dev_deg median 17.4°→7.3°. Consistent with a practice effect: cycles
+get shorter/faster and both individual cycles and bout-to-bout geometry
+become more stable with practice. Worth showing the user prominently — this
+is the first genuinely interesting substantive result beyond validation.
+
+**Methodological note worth flagging:** `perp_mean` is trivially ~0 for
+every cycle (median AND std both round to 0.0000 in the summary table) —
+this isn't a bug, it's a direct consequence of PCA mean-centering: the 3rd
+principal-component score's mean over the same points used to fit it is
+exactly zero by construction. `perp_mean`/`perp_sd` are not informative
+"how far off-plane" diagnostics when the plane was fit per-cycle to that
+cycle's own points — `perp_sd` should be treated as the meaningful spread
+term, and any future "flatness" comparison should probably use `perp_sd` or
+`radius_mean`-normalized perp spread, not `perp_mean`.
+
+Verified: `pixi run -e dev jupyter nbconvert --execute --inplace` succeeded
+(0 errors); `pixi run -e dev pytest -q` → 62 passed, 1 skipped, unchanged.
+`phase_coordinates/` untouched.
+
+**Note for the coordinating thread:** git commit/push not attempted here per
+directive — leaving Stage 4+5's files uncommitted on disk for the
+coordinator to handle, consistent with Stage 2/3.
 
 ## Stage 6 — Bayesian analysis for real
 Status: NOT STARTED
