@@ -198,8 +198,44 @@ directive — leaving Stage 4+5's files uncommitted on disk for the
 coordinator to handle, consistent with Stage 2/3.
 
 ## Stage 6 — Bayesian analysis for real
-Status: NOT STARTED
-(Feasibility pre-confirmed 2026-09-01: pymc 5.28.5 / arviz 0.23.4 install and
-run correctly in the `bayes` pixi env; smoke MCMC fit succeeded in ~53s on a
-tiny synthetic case. Real risk is runtime at full-block scale, not
-installability — see plan for scoping approach.)
+Status: DONE
+
+**Process note:** the subagent assigned to this stage fit all 6 blocks
+successfully (see below) but then stalled for ~1hr building the notebook/
+writeup — its own background MCMC-watcher outlived its turn twice, and after
+a third check-in with no response the coordinating thread took over directly
+rather than waiting further. Actual Bayesian compute was never the
+bottleneck (all 6 fits together took well under 10 minutes); this was a
+subagent-coordination issue, not a modeling-cost one. Built
+`04_bayesian.ipynb` directly, executed clean (0 errors), `pytest` still 62
+passed/1 skipped.
+
+**What was fit:** all 6 primary (longest-per-condition) blocks, reduced MCMC
+settings (`draws=300, tune=300, chains=2`), cached to `cache/bayes_*.pkl`
+and combined in `cache/bayes_results.pkl` (same `samples`/`cycles` schema as
+`pca_results.pkl` — plain DataFrames, no pymc/arviz objects, so the notebook
+loads it under `-e dev` with no pymc import needed).
+
+| skill | day/part | n_cycles | elapsed_sec | diagnostic failures |
+|---|---|---|---|---|
+| climb | 1,s | 20 | 30 | rho_tau=0.724 > 0.40 |
+| climb | 3,e | 37 | 37 | boundary posterior multimodal |
+| jump  | 1,s | 9  | 25 | none |
+| jump  | 3,e | 40 | 30 | rho_tau=0.408 > 0.40 |
+| walk  | 1,s | 24 | 175| none |
+| walk  | 3,e | 22 | 23 | rho_tau=0.518 > 0.40 |
+
+**Headline finding — reliability, not just agreement:** on the cleanest fit
+(walk, day 1: no diagnostic failures), PCA and Bayesian estimates track
+closely for radius/perp/phase and produce visually similar plane geometry,
+extending Stage 3's PCA-vs-Noam validation to a third independent estimator.
+But **4 of 6 blocks trip a hard diagnostic failure** the package itself
+defines (`rho_tau` boundary-cloud spread too large, or multimodal boundary
+posterior) at these reduced settings. This is an honest scoping result, not
+a finished comparison — open question for a follow-up: does scaling to
+default settings (`draws=1000, tune=1000, chains=4`) resolve it, or does it
+reflect a real modeling difficulty for short/low-amplitude jump/climb
+cycles specifically?
+
+Not attempted: scaling any block to full default MCMC settings (out of
+scope for this stage's reduced-settings scoping pass; a natural next step).
