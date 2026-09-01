@@ -101,7 +101,50 @@ Verified: `pixi run -e dev pytest -q` → 62 passed, 1 skipped (unchanged,
 `phase_coordinates/` untouched).
 
 ## Stage 3 — Compare against Noam's method (Hilbert consistency + side-by-side)
-Status: NOT STARTED
+Status: DONE
+
+Built `02_compare_noam.ipynb`. Reused Noam's `extract_cycles_from_signal`
+(and `smooth_signal`, `CYCLE_PARAMS`) verbatim from
+`_noam_cycle_extraction_reference.py`, run against the *identical* raw
+hand-Y-relative-to-root signal used for our cached PCA fits — nothing
+refit, all 116 cached (run x hand) entries read from
+`cache/pca_results.pkl`.
+
+**3.1 — Hilbert vs. Noam agreement: strong.**
+- Boundary-time offset (|our Hilbert cycle-boundary time − nearest Noam
+  peak/trough event time|, all 116 runs, ~650-670 boundaries per skill):
+  median 0.17-0.20s across walk/jump/climb (IQR roughly 0.13-0.27s). That's
+  ~15-25% of a typical cycle duration (0.65-1.1s) — small, and expected,
+  since the two methods define "boundary" differently (phase-zero-crossing
+  vs. a smoothed peak/trough location within the cycle), not because either
+  method is unstable.
+- Hilbert phase-monotonicity warnings (from `hilbert_phase`, computed during
+  Stage 2): essentially none — 0/34 climb, 1/40 jump (2.5%), 0/42 walk.
+- **0 runs skipped** — both methods produced usable cycles for all 116
+  cached fits.
+
+**3.2 — Cycle count / duration / shape: strong agreement.**
+Per the 6 primary blocks x 2 hands (12 rows), cycle counts differ by only
+1-4 cycles between methods (e.g. climb day1-s r_hand: 20 ours vs. 18 Noam's;
+jump day3-e: 41 vs. 40 both hands), and median cycle durations match almost
+exactly in most conditions (many exact frame-level matches, e.g. walk
+day1-s both hands: 1.033s vs. 1.033s). Full table in the notebook's last
+cell. Mean-cycle-shape overlay (Noam's raw-signal `y_cycle_norm` vs. our
+PCA-reconstruction's hand-Y-relative-to-root, both normalized to 100 points)
+plotted in `figures/stage3_mean_cycle_shape_comparison.png` — visually
+consistent per skill/hand/day.
+
+**Bottom line: the two independent methods substantially agree** — this is
+a real validation result, not just "the code ran." No anomalies worth
+escalating; nothing suggests either method is broken.
+
+Verified: `pixi run -e dev jupyter nbconvert --execute --inplace` succeeded
+with 0 errors; `pixi run -e dev pytest -q` → 62 passed, 1 skipped, unchanged.
+
+**Note for the coordinating thread:** git commit/push were blocked by a
+permission-classifier issue at the time this stage ran (per the plan's
+operational-decisions section, commits should happen after every stage) —
+this stage's files are uncommitted on disk, same as Stage 2's.
 
 ## Stage 4+5 — Plane geometry / radius/perp + drift & variability
 Status: NOT STARTED
