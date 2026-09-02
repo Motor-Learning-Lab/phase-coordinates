@@ -165,7 +165,7 @@ measured 3-D hand-relative-to-root points scattered on it
 **Subphase 5a (within-block drift):** one combined 6-condition x 5-metric
 grid (`stage5_within_block_drift_grid.png`) — duration, center-distance-
 from-block-mean, normal-angular-deviation-from-block-mean, radius_mean,
-perp_mean, all vs. cycle index.
+**perp_sd** (within-cycle off-plane *width*), all vs. cycle index.
 
 **Subphase 5b (across-run, day 1 vs day 3):** using all 58 runs (not just
 the 6 primary blocks) as real bout-to-bout replicate data, per-run means of
@@ -179,15 +179,31 @@ get shorter/faster and both individual cycles and bout-to-bout geometry
 become more stable with practice. Worth showing the user prominently — this
 is the first genuinely interesting substantive result beyond validation.
 
-**Methodological note worth flagging:** `perp_mean` is trivially ~0 for
-every cycle (median AND std both round to 0.0000 in the summary table) —
-this isn't a bug, it's a direct consequence of PCA mean-centering: the 3rd
-principal-component score's mean over the same points used to fit it is
-exactly zero by construction. `perp_mean`/`perp_sd` are not informative
-"how far off-plane" diagnostics when the plane was fit per-cycle to that
-cycle's own points — `perp_sd` should be treated as the meaningful spread
-term, and any future "flatness" comparison should probably use `perp_sd` or
-`radius_mean`-normalized perp spread, not `perp_mean`.
+**2026-09-02 fix:** the original version of this stage tracked `perp_mean`
+as its 5th metric, which is trivially ~0 for every cycle by construction
+(PCA mean-centering guarantees the 3rd component's mean over the same
+points used to fit it is exactly zero — not a bug, just uninformative).
+Swapped to `perp_sd` (within-cycle off-plane width) in both subphases per
+explicit user request. Re-executed clean (0 errors), `pytest` still 62
+passed/1 skipped.
+
+**perp_sd Day-1-vs-Day-3 result — mostly consistent with the practice
+effect above, but not uniformly:** median per-run perp_sd (r_hand):
+
+| skill | day 1 | day 3 |
+|---|---|---|
+| walk  | 1.54 | 0.48 |
+| jump  | 2.07 | 0.61 |
+| climb | 1.38 | 1.75 |
+
+Walk and jump both show off-plane width shrinking ~3x with practice,
+matching the duration/center/normal-drift story. **Climb goes the other
+way** — width *increases* from day 1 to day 3, and still does even after
+normalizing by `radius_mean` (0.089→0.106) to rule out it just being a
+side-effect of climb's own radius changing. Worth flagging as a genuine
+exception rather than smoothing it into the "practice makes it more stable"
+narrative — climb's cycles may be getting less planar, not more, with
+practice, or this metric may behave differently for climbing specifically.
 
 Verified: `pixi run -e dev jupyter nbconvert --execute --inplace` succeeded
 (0 errors); `pixi run -e dev pytest -q` → 62 passed, 1 skipped, unchanged.
