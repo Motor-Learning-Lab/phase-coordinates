@@ -7,9 +7,12 @@ and cycle normals with posterior uncertainty, followed by an instantaneous
 model (Layer 2) that uses the Layer 1 posterior summaries as priors for
 smoothly varying phase, center, normal, radius, and perpendicular deviation.
 
-This module is independent of :mod:`phase_coordinates.core` and does not
-replace :func:`phase_coordinates.core.hilbert_phase` or
-:func:`phase_coordinates.core.fit_pca_phase_coordinates`.
+This module does not replace :func:`phase_coordinates.core.hilbert_phase` or
+:func:`phase_coordinates.core.fit_pca_phase_coordinates`, but it does reuse
+:func:`phase_coordinates.core.hilbert_phase` internally (see
+``_estimate_sigma_delta_plugin``) to set a data-driven prior width for
+Layer 1's per-cycle phase-0 offset, on the same dominant reference signal
+already used to seed the cycle count/period.
 
 PyMC and ArviZ are optional dependencies. They are imported lazily so that
 importing this module (and the rest of ``phase_coordinates``) never requires
@@ -20,11 +23,13 @@ them. Install with ``pip install -e .[bayes]`` to use
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import find_peaks, periodogram
+
+from .core import hilbert_phase
 
 _BAYES_INSTALL_HINT = (
     "fit_bayesian_phase_coordinates() requires the optional 'pymc' and "
@@ -145,6 +150,59 @@ def seed_cycle_centers(X, tau_idx):
     )
 
 
+def _estimate_sigma_delta_plugin(ref_signal, fs, tau_hat, T0):
+    """
+    Data-driven, fixed prior width for Layer 1's per-cycle phase-0 offset
+    (``delta_k`` in ``tau_k = tau_hat_k + delta_k``).
+
+    Uses ``hilbert_phase`` on the *same* dominant reference signal already
+    used to seed ``tau_hat``/``T0`` (keeps the phase-0 convention
+    self-consistent with the seed rather than risking a second, differently
+    -aligned reference), compared against a piecewise-linear "nominal" phase
+    that passes through exactly ``2*pi`` at each seed boundary time. The
+    resulting continuous discrepancy ``delta(t)`` is reduced to one value
+    per cycle (mean) and then a plain standard deviation across cycles --
+    see ``notebooks/bayes_tau_delta_funnel_diagnostic.ipynb`` (method B) for
+    why no additional noise correction is applied: empirically
+    indistinguishable from a more careful variance-components correction at
+    realistic per-cycle sample counts.
+
+    Falls back to ``_BOUNDARY_TIMING_SD_FRAC * T0`` (the previous fixed
+    constant) if there are too few cycles to estimate a spread from, or if
+    ``hilbert_phase`` fails on this particular reference signal.
+    """
+    K = len(tau_hat)
+    if K < 3:
+        return _BOUNDARY_TIMING_SD_FRAC * T0
+
+    f_range = (0.5 / T0, 2.0 / T0)
+    try:
+        phase_unwrapped, _, _ = hilbert_phase(ref_signal, fs=fs, f_range=f_range)
+    except ValueError:
+        return _BOUNDARY_TIMING_SD_FRAC * T0
+
+    n_time = len(ref_signal)
+    t_grid = np.arange(n_time) / fs
+    cycle_idx = np.clip(np.searchsorted(tau_hat, t_grid, side="right") - 1, 0, K - 2)
+    tau_k = tau_hat[cycle_idx]
+    tau_kp1 = tau_hat[cycle_idx + 1]
+    nominal_phase = 2 * np.pi * cycle_idx + 2 * np.pi * (t_grid - tau_k) / (tau_kp1 - tau_k)
+    omega = 2 * np.pi / T0
+    delta_of_t = (nominal_phase - phase_unwrapped) / omega
+
+    cycle_means = np.array([
+        delta_of_t[cycle_idx == k].mean()
+        for k in range(K - 1)
+        if np.any(cycle_idx == k)
+    ])
+    if len(cycle_means) < 2:
+        return _BOUNDARY_TIMING_SD_FRAC * T0
+
+    sigma_delta = float(np.std(cycle_means, ddof=1))
+    floor = 0.01 * T0
+    return max(sigma_delta, floor)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -263,50 +321,6 @@ def _linear_interp_matrix(t_grid, eval_t):
 # ---------------------------------------------------------------------------
 
 @dataclass
-class BayesianPhaseEstimates:
-    """Posterior mean point estimates (spec: "Estimates")."""
-
-    # Cycle-level (Layer 1)
-    tau: np.ndarray                  # (K,) boundary times, seconds
-    period: np.ndarray               # (K-1,) cycle durations T_k, seconds
-    cycle_center: np.ndarray         # (K-1, 3)
-    cycle_normal: np.ndarray         # (K-1, 3)
-    boundary_direction: np.ndarray   # (K-1, 3) a_k
-
-    # Instantaneous (Layer 2), one row per time sample in the fitted window
-    time: np.ndarray                 # (n_time,) seconds
-    phase: np.ndarray                # (n_time,)
-    phase_velocity: np.ndarray       # (n_time,)
-    center: np.ndarray               # (n_time, 3)
-    normal: np.ndarray               # (n_time, 3)
-    e1: np.ndarray                   # (n_time, 3)
-    e2: np.ndarray                   # (n_time, 3)
-    radius: np.ndarray               # (n_time,)
-    perp_deviation: np.ndarray       # (n_time,)
-    predicted_trajectory: np.ndarray  # (n_time, 3)
-
-
-@dataclass
-class BayesianPhaseUncertainty:
-    """Posterior SDs / credible half-widths for key quantities (spec: "Uncertainty")."""
-
-    tau_sd: np.ndarray                 # (K,)
-    period_sd: np.ndarray              # (K-1,)
-    cycle_center_sd: np.ndarray        # (K-1, 3)
-    cycle_normal_angular_sd: np.ndarray  # (K-1,) radians
-    boundary_direction_sd: np.ndarray  # (K-1, 3)
-
-    phase_sd: np.ndarray               # (n_time,)
-    phase_velocity_sd: np.ndarray      # (n_time,)
-    center_sd: np.ndarray              # (n_time, 3)
-    normal_angular_sd: np.ndarray      # (n_time,) radians
-    radius_sd: np.ndarray              # (n_time,)
-    perp_deviation_sd: np.ndarray      # (n_time,)
-
-    observation_noise_sd: float        # sigma_x posterior mean
-
-
-@dataclass
 class BayesianPhaseDiagnostics:
     """
     Diagnostics from the spec's "Diagnostics" section. ``failures`` are hard
@@ -332,16 +346,6 @@ class BayesianPhaseDiagnostics:
     def ok(self) -> bool:
         """``True`` if there are no hard failures."""
         return len(self.failures) == 0
-
-
-@dataclass
-class BayesianPhaseResult:
-    """Top-level result of :func:`fit_bayesian_phase_coordinates`."""
-
-    estimates: BayesianPhaseEstimates
-    uncertainty: BayesianPhaseUncertainty
-    diagnostics: BayesianPhaseDiagnostics
-    bayesian_report: Optional[Any] = None
 
 
 def _pt_interp_at(t_grid_const, X_grid_const, tau, n_grid, pt):
@@ -443,6 +447,7 @@ def _fit_layer1(
     T0,
     R_X,
     xbar,
+    ref,
     draws,
     tune,
     chains,
@@ -459,12 +464,25 @@ def _fit_layer1(
 
     tau_hat = tau_idx / fs
     c_hat = seed_cycle_centers(X, tau_idx)
+    sigma_delta_plugin = _estimate_sigma_delta_plugin(ref, fs, tau_hat, T0)
 
     t_grid_const = pt.constant(t_grid, name="t_grid")
     X_const = pt.constant(X, name="X_grid")
 
     with pm.Model():
-        tau = pm.Normal("tau", mu=tau_hat, sigma=_BOUNDARY_TIMING_SD_FRAC * T0, shape=K)
+        # tau_hat (from dominant-PC-signal peaks) still fully controls cycle
+        # count and relative spacing. delta is the shared phase-0 offset the
+        # boundary-clustering likelihood below can actually move -- freely,
+        # since sigma_delta_plugin is a fixed, data-driven width (see
+        # _estimate_sigma_delta_plugin) rather than the old tight, arbitrary
+        # constant that left it almost no room to correct a bad seed.
+        # Centered (delta_k directly around delta) rather than non-centered:
+        # empirically no funnel here with a fixed sigma (see
+        # notebooks/bayes_tau_delta_funnel_diagnostic.ipynb) and centered
+        # sampled better in every variant tested.
+        delta = pm.Uniform("delta", lower=-T0 / 2, upper=T0 / 2)
+        delta_k = pm.Normal("delta_k", mu=delta, sigma=sigma_delta_plugin, shape=K)
+        tau = pm.Deterministic("tau", tau_hat + delta_k)
 
         T = pm.Deterministic("T", tau[1:] - tau[:-1])
         T_safe = pt.maximum(T, 1e-3 * T0)
@@ -499,7 +517,8 @@ def _fit_layer1(
         )
 
         initvals = {
-            "tau": tau_hat,
+            "delta": 0.0,
+            "delta_k": np.zeros(K),
             "c": c_hat,
             "mu_tau": xbar,
             "rho_tau": 0.10,
@@ -1093,7 +1112,7 @@ def fit_bayesian_phase_coordinates(
     tau_idx = seed_boundary_indices(ref, fs, T0)
 
     layer1 = _fit_layer1(
-        X_arr, fs, tau_idx, T0, R_X, xbar,
+        X_arr, fs, tau_idx, T0, R_X, xbar, ref,
         draws=draws, tune=tune, chains=chains, target_accept=target_accept,
         random_seed=random_seed, use_numba=use_numba,
     )
@@ -1266,104 +1285,3 @@ def fit_bayesian_phase_coordinates(
         details["report"] = {"layer1": layer1.idata, "layer2": layer2.idata}
 
     return samples, cycles, details
-
-
-def _fit_bayesian_phase_coordinates_legacy(
-    X,
-    sampling_rate_hz,
-    columns=None,
-    n_velocity_knots=None,
-    draws=1000,
-    tune=1000,
-    chains=4,
-    target_accept=0.9,
-    random_seed=None,
-    return_report=False,
-):
-    """Legacy wrapper returning BayesianPhaseResult (for internal use)."""
-    import pandas as pd
-
-    if isinstance(X, pd.DataFrame):
-        X_arr = X[columns].to_numpy(dtype=float) if columns else X.to_numpy(dtype=float)
-    else:
-        X_arr = np.asarray(X, dtype=float)
-
-    if X_arr.ndim != 2 or X_arr.shape[1] != 3:
-        raise ValueError(
-            f"fit_bayesian_phase_coordinates requires 3-D data, shape "
-            f"(n_time, 3); got shape {X_arr.shape}."
-        )
-    if not np.all(np.isfinite(X_arr)):
-        raise ValueError("X contains non-finite values (NaN or Inf).")
-
-    fs = float(sampling_rate_hz)
-    if fs <= 0:
-        raise ValueError(f"sampling_rate_hz must be positive, got {fs}.")
-
-    _import_pymc()
-    _import_pytensor_tensor()
-    _import_arviz()
-    use_numba = _numba_available()
-
-    R_X, xbar = robust_movement_scale(X_arr)
-    ref = dominant_reference_signal(X_arr)
-    T0 = estimate_dominant_period(ref, fs)
-    tau_idx = seed_boundary_indices(ref, fs, T0)
-
-    layer1 = _fit_layer1(
-        X_arr, fs, tau_idx, T0, R_X, xbar,
-        draws=draws, tune=tune, chains=chains, target_accept=target_accept,
-        random_seed=random_seed, use_numba=use_numba,
-    )
-    layer2 = _fit_layer2(
-        X_arr, fs, layer1, T0, R_X, n_velocity_knots=n_velocity_knots,
-        draws=draws, tune=tune, chains=chains, target_accept=target_accept,
-        random_seed=random_seed, use_numba=use_numba,
-    )
-
-    K = len(layer1.tau_mean)
-    estimates = BayesianPhaseEstimates(
-        tau=layer1.tau_mean,
-        period=layer1.period_mean,
-        cycle_center=layer1.center_mean,
-        cycle_normal=layer1.normal_mean,
-        boundary_direction=layer1.a0_mean,
-        time=layer2.time,
-        phase=layer2.phase_mean,
-        phase_velocity=layer2.phase_velocity_mean,
-        center=layer2.center_mean,
-        normal=layer2.normal_mean,
-        e1=layer2.e1_mean,
-        e2=layer2.e2_mean,
-        radius=layer2.radius_mean,
-        perp_deviation=layer2.perp_deviation_mean,
-        predicted_trajectory=layer2.predicted_trajectory_mean,
-    )
-
-    uncertainty = BayesianPhaseUncertainty(
-        tau_sd=layer1.tau_sd,
-        period_sd=layer1.period_sd,
-        cycle_center_sd=layer1.center_sd,
-        cycle_normal_angular_sd=np.zeros(K - 1),
-        boundary_direction_sd=np.zeros_like(layer1.a0_mean),
-        phase_sd=layer2.phase_sd,
-        phase_velocity_sd=layer2.phase_velocity_sd,
-        center_sd=layer2.center_sd,
-        normal_angular_sd=layer2.normal_angular_sd,
-        radius_sd=layer2.radius_sd,
-        perp_deviation_sd=layer2.perp_deviation_sd,
-        observation_noise_sd=layer2.sigma_x_mean,
-    )
-
-    diagnostics = _compute_diagnostics(layer1, layer2, R_X)
-
-    bayesian_report = None
-    if return_report:
-        bayesian_report = {"layer1": layer1.idata, "layer2": layer2.idata}
-
-    return BayesianPhaseResult(
-        estimates=estimates,
-        uncertainty=uncertainty,
-        diagnostics=diagnostics,
-        bayesian_report=bayesian_report,
-    )
