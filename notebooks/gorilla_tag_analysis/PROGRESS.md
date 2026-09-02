@@ -356,3 +356,70 @@ actual `phase_coordinates/` *package* code change (as opposed to
 analysis-notebook work) — per the established branch policy, it belongs on
 a dedicated branch with explicit sign-off before touching `bayesian.py`.
 Solution ideas discussed with the user; branch work deferred for now.
+
+**2026-09-02 — fixed, merged to main.** After extensive diagnosis in
+`notebooks/bayes_tau_delta_funnel_diagnostic.ipynb` (toy-model funnel/
+correlation checks, method B vs C for `sigma_delta` estimation, a velocity-
+derived plug-in, then a `hilbert_phase`-based one), `phase_coordinates/
+bayesian.py`'s Layer 1 now reparameterizes `tau = tau_hat + delta_k`, with
+`sigma_delta` a fixed, data-driven plug-in from `hilbert_phase` on the same
+`dominant_reference_signal` already used for `T0`/`tau_hat`, reduced via
+method B (per-cycle mean, then std across cycles — no funnel with fixed
+sigma, no measurable benefit from a fancier noise correction at realistic
+sample counts). Dead legacy code (`_fit_bayesian_phase_coordinates_legacy`
+and its unused result dataclasses) removed in the same change.
+
+Validated on all 6 real cached blocks: `rho_tau` (spatial spread at
+phase-0 — the metric that should be minimal, not agreement with any
+external convention) improved 20-24% in 4/6 blocks and resolved a
+multimodal boundary posterior in a 5th; the two blocks with a small
+increase stayed well within the healthy range. `delta`'s own posterior is
+reasonably well-determined (std ~15-50ms against ~0.7-1.1s cycles, worst
+case ~18° of phase) and notably tighter at day 3 than day 1 across all
+three skills — consistent with the Day-1-vs-Day-3 stability finding from
+Stage 4+5. See branch `bayes-phase0-tau-delta-diagnostics` (merged) for
+the full investigation history.
+
+## Stage 5 — Three-way comparison: PCA, Noam, Bayesian
+Status: DONE
+
+Built `05_three_way_comparison.ipynb`, extending Stage 3's PCA-vs-Noam
+comparison to include the now-fixed Bayesian method, on all 6 primary
+blocks x 2 hands. Refit Bayesian on both hands (12 fits total, ~7 min) —
+cached to `cache/bayes_results_both_hands.pkl`. **Supersedes
+`04_bayesian.ipynb`'s Bayesian content**, which used the old, buggy
+phase-0 anchoring; that notebook is left as a historical record, not
+updated.
+
+**Cycle count/duration: strong three-way agreement.** Counts differ by
+0-4 out of 18-41 per block across all three methods (e.g. jump day3-e:
+41/40/40 both hands), durations match closely (e.g. jump day3-e r_hand:
+0.750s/0.750s/0.748s). The fix delivered exactly what it was meant to on
+cycle *timing* — Bayesian's counting now tracks Noam's and PCA's as well
+as PCA already did.
+
+**Geometry: PCA and Bayesian diverge systematically, and it's explainable.**
+Every one of 12 blocks/hands: `radius_mean` smaller for Bayesian than PCA
+(15-25%, e.g. climb day1-s r_hand: 15.6→11.4), `perp_sd` smaller for
+Bayesian, often dramatically (3-10x, e.g. jump day1-s l_hand: 3.07→0.53).
+Not a bug — PCA fits an unconstrained per-cycle plane (its radius/perp
+reflect all raw scatter including noise); Bayesian has an explicit
+smoothness prior on perpendicular deviation and hierarchical shrinkage on
+radius, with observation noise (`sigma_x`) split out separately. Smaller,
+more consistent values are the expected consequence of that regularization.
+
+**Mean-cycle-shape:** Noam and PCA continue to overlay closely (per Stage
+3). Bayesian's curve is visually close but not always phase-identical —
+expected, since Bayesian's phase-0 is anchored to minimum spatial spread
+(`rho_tau`), a genuinely different target than Noam's peak/trough
+convention (which PCA's phase-anchored windows now match) — see the
+funnel-diagnostic notebook's investigation for why these targets can
+legitimately diverge.
+
+**Process note:** the fork initially assigned to build this notebook
+stalled for 30+ minutes with zero file output and an unanswered status
+check; it had also left an orphaned background fitting process running
+(competing for CPU with the coordinator's own retry). The coordinator
+killed the orphaned process and built this notebook directly. Consistent
+with the fork-stall pattern already logged in memory — worth remembering
+this can recur even after one prior occurrence in the same session.
