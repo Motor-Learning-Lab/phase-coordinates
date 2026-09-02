@@ -305,3 +305,54 @@ cycles specifically?
 
 Not attempted: scaling any block to full default MCMC settings (out of
 scope for this stage's reduced-settings scoping pass; a natural next step).
+
+## Follow-up investigation (2026-09-02) — Bayesian phase-0 anchoring is coupled to cycle-counting
+
+Raised by the user while discussing Layer 1/Layer 2: the same "primary cycle
+direction" signal (`dominant_reference_signal` = top-SVD-component
+projection of the 3-D trajectory) is used *both* to estimate cycle count/
+period (`T0`, seed count `K`) *and*, via a tight prior
+(`tau ~ Normal(tau_hat, 0.075*T0)`), to anchor where phase=0 actually sits
+within each cycle. Hypothesis: good for the former, potentially poor for
+the latter, since a variance-maximizing axis has no reason to align with a
+physically consistent reference the way Noam's peak/trough convention does.
+
+**Empirically checked** on all 6 cached Bayesian blocks (r_hand): compared
+the deterministic seed (`tau_hat`, peaks of the dominant-PC signal) against
+the actual posterior mean (`tau_mean`, read from `cycles["time_start"/
+"time_stop"]`) against Noam's peak/trough events on the same signal.
+
+| skill | day | T0 (s) | seed→posterior shift | posterior vs. Noam | seed vs. Noam | spread: seed→posterior |
+|---|---|---|---|---|---|---|
+| climb | 1 | 1.09 | 0.025s | 0.034s | 0.000s | 6.20→5.87 |
+| climb | 3 | 0.73 | 0.025s | **0.327s (45%)** | 0.350s | 2.05→1.67 |
+| jump  | 1 | 1.00 | 0.030s | 0.030s | 0.000s | 3.23→2.80 |
+| jump  | 3 | 0.78 | 0.038s | 0.040s | 0.067s | 3.10→2.40 |
+| walk  | 1 | 1.04 | 0.009s | **0.493s (47%)** | 0.500s | 3.66→2.72 |
+| walk  | 3 | 0.65 | 0.011s | 0.013s | 0.000s | 2.43→2.42 |
+
+**Confirmed, not just theoretical.** Three findings:
+1. The posterior mean essentially never moves from the seed (9-38ms shift
+   everywhere) — the `0.075*T0` prior is tight enough that the
+   boundary-clustering likelihood has almost no room to relocate anything.
+2. When the seed happens to align with Noam's convention, everything looks
+   fine (4/6 blocks, <70ms off). When it doesn't (climb day3, walk day1 —
+   both ~half a cycle off), the posterior barely improves on it (a few tens
+   of ms of "correction" against a ~350-500ms problem).
+3. The spatial-spread column shows the clustering term isn't inert — it
+   reliably tightens spread by ~10-25% everywhere, including the two bad
+   blocks — it's just boxed into too small a neighborhood around a possibly-
+   bad seed to reach a genuinely better location.
+
+**Doesn't show up in the model's own diagnostics.** Walk day1 was one of
+the two *cleanest* Stage 6 fits (zero diagnostic failures) despite being the
+worst-aligned with Noam's convention here — internal convergence confidence
+and external phase-0 meaningfulness are different things, and only an
+external reference check (like this one, or the earlier PCA-vs-Noam
+Stage-3 fix) catches the latter.
+
+**Status:** confirmed real, not yet fixed. This is the project's first
+actual `phase_coordinates/` *package* code change (as opposed to
+analysis-notebook work) — per the established branch policy, it belongs on
+a dedicated branch with explicit sign-off before touching `bayesian.py`.
+Solution ideas discussed with the user; branch work deferred for now.
