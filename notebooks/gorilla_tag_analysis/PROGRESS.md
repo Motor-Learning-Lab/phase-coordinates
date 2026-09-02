@@ -110,33 +110,83 @@ hand-Y-relative-to-root signal used for our cached PCA fits — nothing
 refit, all 116 cached (run x hand) entries read from
 `cache/pca_results.pkl`.
 
-**3.1 — Hilbert vs. Noam agreement: strong.**
-- Boundary-time offset (|our Hilbert cycle-boundary time − nearest Noam
-  peak/trough event time|, all 116 runs, ~650-670 boundaries per skill):
-  median 0.17-0.20s across walk/jump/climb (IQR roughly 0.13-0.27s). That's
-  ~15-25% of a typical cycle duration (0.65-1.1s) — small, and expected,
-  since the two methods define "boundary" differently (phase-zero-crossing
-  vs. a smoothed peak/trough location within the cycle), not because either
-  method is unstable.
+**2026-09-02 fix — phase-anchoring correction.** The original 3.1 compared
+our cycle *boundaries* (`fit_pca_phase_coordinates`'s `cycle` column /
+`cycles["time_start"/"time_stop"]`, anchored to `phase[0]` — whatever
+absolute phase happened to be at each run's first sample) directly against
+Noam's peak/trough events, and found a systematic ~15-25%-of-a-cycle offset.
+Investigated per the user's request: is this a constant phase shift (they
+suspected our boundary sits at a zero-crossing, ~pi/2 from her peak)?
+
+Checked directly, two things:
+1. Our raw absolute `phase` at Noam's own events is already extremely
+   tightly locked to the waveform — circular resultant length R~0.98 at
+   phase=0 for "peaks"-type hands/skills, and R~0.98 at phase=pi for
+   "troughs"-type (walk l_hand). No shift in the phase estimate itself.
+2. But `phase[0]` (the reference our *cycle boundaries* are anchored to)
+   is **not** random across the 116 runs — it clusters bimodally right at
+   +-90 degrees (R~0.05 for a single circular mean, because it's genuinely
+   bimodal at +90 AND -90, not one direction). That's because these runs
+   are extracted from a movement-onset classifier's positive windows, and a
+   limb is most likely to be flagged "moving" right as it crosses the
+   middle of its range (fastest-changing, easiest to detect), not at the
+   top/bottom of a swing where it's momentarily still.
+
+So the user's intuition was correct in substance (our boundary sits at a
+positive- or negative-going zero-crossing, hers at the peak) even though the
+literal "constant pi/2" framing undersold it slightly — it's not a fixed
+pi/2 *rotation* to undo, it's that the *reference point itself* (`phase[0]`)
+is uninformatively tied to wherever the recording happens to start rather
+than to any feature of the waveform.
+
+**Fix applied** (comparison-only — does not touch `phase_coordinates/` or
+any other stage's cycle fits): re-derive "our" cycle boundaries directly
+from raw absolute `phase`, anchored at 0 (peaks) or pi (troughs) per the
+same `event_type_by_hand` lookup Noam's method uses, instead of at
+`phase[0]`. Implemented as `phase_reference()` + `phase_anchored_windows()`
+in the notebook, used by both 3.1 and 3.2.
+
+**Result — offset collapses to ~1 frame:**
+
+| skill | median offset (before) | median offset (after) |
+|---|---|---|
+| climb | 0.183s | 0.017s |
+| jump  | 0.200s | 0.000s |
+| walk  | 0.167s | 0.017s |
+
+0.017s = 1 frame at 60Hz — i.e. after the correction, our boundaries and
+Noam's events land on the same frame essentially every time. This
+confirms the fix (the "agreement" claim below is now much stronger than it
+was, not just re-confirmed) and confirms the mechanism was a boundary
+*reference* artifact, not a phase-estimation problem.
+
+**3.1 — Hilbert vs. Noam agreement: now near-exact** (see table above; was
+"strong" pre-fix at ~15-25% offset).
 - Hilbert phase-monotonicity warnings (from `hilbert_phase`, computed during
   Stage 2): essentially none — 0/34 climb, 1/40 jump (2.5%), 0/42 walk.
 - **0 runs skipped** — both methods produced usable cycles for all 116
   cached fits.
 
-**3.2 — Cycle count / duration / shape: strong agreement.**
-Per the 6 primary blocks x 2 hands (12 rows), cycle counts differ by only
-1-4 cycles between methods (e.g. climb day1-s r_hand: 20 ours vs. 18 Noam's;
-jump day3-e: 41 vs. 40 both hands), and median cycle durations match almost
-exactly in most conditions (many exact frame-level matches, e.g. walk
-day1-s both hands: 1.033s vs. 1.033s). Full table in the notebook's last
-cell. Mean-cycle-shape overlay (Noam's raw-signal `y_cycle_norm` vs. our
-PCA-reconstruction's hand-Y-relative-to-root, both normalized to 100 points)
+**3.2 — Cycle count / duration / shape: strong agreement** (re-run with
+phase-anchored windows on the "ours" side; numbers barely moved from the
+pre-fix version since 3.2 was never using the mis-anchored boundaries the
+same way 3.1 was — the fix mainly sharpens the mean-cycle-shape overlay's
+phase-axis alignment). Per the 6 primary blocks x 2 hands (12 rows), cycle
+counts differ by only 1-4 cycles between methods (e.g. climb day1-s r_hand:
+21 ours vs. 18 Noam's; jump day3-e: 42 vs. 40 both hands), and median cycle
+durations match almost exactly in most conditions (many exact frame-level
+matches, e.g. jump day1-s r_hand: 0.925s vs. 0.925s). Full table in the
+notebook's last cell. Mean-cycle-shape overlay (Noam's raw-signal
+`y_cycle_norm` vs. our PCA-reconstruction's hand-Y-relative-to-root, both
+normalized to 100 points, now both starting at the same peak/trough)
 plotted in `figures/stage3_mean_cycle_shape_comparison.png` — visually
 consistent per skill/hand/day.
 
-**Bottom line: the two independent methods substantially agree** — this is
-a real validation result, not just "the code ran." No anomalies worth
-escalating; nothing suggests either method is broken.
+**Bottom line: the two independent methods substantially agree, and once
+compared on a like-for-like phase reference, agree almost exactly on where
+cycle boundaries fall** — this is a real, now sharper validation result, not
+just "the code ran." No anomalies worth escalating; nothing suggests either
+method is broken.
 
 Verified: `pixi run -e dev jupyter nbconvert --execute --inplace` succeeded
 with 0 errors; `pixi run -e dev pytest -q` → 62 passed, 1 skipped, unchanged.
