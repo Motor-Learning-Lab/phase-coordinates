@@ -17,3 +17,13 @@ dist/
 .venv/
 venv/
 env/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Local editor settings and personal working notes
+.vscode/
+test_data/things_to_do.md
