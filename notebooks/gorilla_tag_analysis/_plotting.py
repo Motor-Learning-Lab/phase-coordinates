@@ -24,6 +24,9 @@ PART_LABELS = {"s": "start", "m": "middle", "e": "end"}
 DAY_MARKERS = {1: "o", 3: "s"}
 HAND_MARKERS = {"r_hand": "o", "l_hand": "^"}
 DAY_LINESTYLES = {1: "--", 3: "-"}
+# Adjacent cycles use contrasting colors so their boundaries remain legible in
+# dense full-run time-series plots.
+CYCLE_COLORS = ("#0072B2", "#D55E00")
 
 FIGURES_DIR = Path(__file__).resolve().parent / "figures"
 FIGURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -56,6 +59,26 @@ def save_figure(fig, stem, pdf=False):
         fig.savefig(pdf_path, bbox_inches="tight")
         saved["pdf"] = pdf_path
     return saved
+
+
+def plot_by_cycle(ax, samples, cycles, value, *, linewidth=0.8):
+    """Plot a time-series in alternating colors, one segment per cycle.
+
+    Faint vertical rules mark the starts of fitted cycles.  Keeping this in
+    the shared plotting module makes the convention straightforward to reuse
+    for every cycle-resolved time-series in the analysis notebooks.
+    """
+    time = samples["time"].to_numpy()
+    cycle_ids = samples["cycle"].to_numpy()
+    values = samples[value].to_numpy()
+
+    for position, cycle_id in enumerate(pd.unique(cycle_ids)):
+        mask = cycle_ids == cycle_id
+        ax.plot(time[mask], values[mask], color=CYCLE_COLORS[position % len(CYCLE_COLORS)],
+                lw=linewidth)
+
+    for time_start in cycles["time_start"].iloc[1:]:
+        ax.axvline(time_start, color="0.35", lw=0.45, ls=":", alpha=0.45, zorder=0)
 
 
 def equal_limits(*series, padding_fraction=0.08, positive=False, log_scale=False):
