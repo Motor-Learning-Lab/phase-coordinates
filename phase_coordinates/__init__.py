@@ -15,6 +15,8 @@ Public API
 hilbert_phase
     Estimate instantaneous phase from a scalar reference signal via the
     Hilbert transform.
+dominant_reference_signal
+    Derive the shared dominant principal-component reference signal.
 fit_pca_phase_coordinates
     Cycle-by-cycle PCA phase coordinates (fast; phase supplied or Hilbert).
 fit_bayesian_phase_coordinates
@@ -29,6 +31,8 @@ CYCLE_COLUMNS
 """
 
 from .core import (
+    dominant_reference_signal,
+    estimate_dominant_period,
     hilbert_phase,
     fit_pca_phase_coordinates,
     reconstruct_phase_coordinates,
@@ -39,6 +43,8 @@ from .core import (
 from .bayesian import fit_bayesian_phase_coordinates
 
 __all__ = [
+    "dominant_reference_signal",
+    "estimate_dominant_period",
     "hilbert_phase",
     "fit_pca_phase_coordinates",
     "fit_bayesian_phase_coordinates",

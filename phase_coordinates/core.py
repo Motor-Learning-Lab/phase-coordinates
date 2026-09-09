@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
-from scipy.signal import butter, sosfiltfilt, hilbert
+from scipy.signal import butter, sosfiltfilt, hilbert, periodogram
 
 # Minimum signal length required by sosfiltfilt with a 4th-order Butterworth
 # filter (2 second-order sections → default padlen = 3 * 2 * 2 = 12).
@@ -70,6 +70,66 @@ CYCLE_COLUMNS = [
     "n_samples",
     "fit_ok",
 ]
+
+
+def dominant_reference_signal(X):
+    """Return the score along the dominant principal component of ``X``.
+
+    The trajectory is mean-centered before the component is estimated.  This
+    gives a single scalar signal that captures the largest coordinated motion
+    in the multivariate recording, and is used as the automatic reference by
+    both phase-coordinate estimators.
+    """
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2:
+        raise ValueError(f"X must be 2-D, got shape {X.shape}.")
+    if X.shape[0] < 2 or X.shape[1] < 1:
+        raise ValueError(
+            "X must contain at least two samples and one feature to derive "
+            "a dominant reference signal."
+        )
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X contains non-finite values (NaN or Inf).")
+
+    Xc = X - X.mean(axis=0)
+    _, _, vt = np.linalg.svd(Xc, full_matrices=False)
+    return Xc @ vt[0]
+
+
+def estimate_dominant_period(ref_signal, fs):
+    """Estimate a scalar signal's dominant positive-frequency period.
+
+    The estimate is the reciprocal of the maximum-power non-zero frequency
+    in the periodogram.
+    """
+    ref_signal = np.asarray(ref_signal, dtype=float)
+    freqs, power = periodogram(ref_signal, fs=fs)
+    valid = freqs > 0
+    if not np.any(valid):
+        raise ValueError(
+            "Cannot estimate a dominant frequency: signal is too short or "
+            "has no positive-frequency content."
+        )
+    f0 = float(freqs[valid][np.argmax(power[valid])])
+    if f0 <= 0:
+        raise ValueError("Estimated dominant frequency is non-positive.")
+    return 1.0 / f0
+
+
+def _automatic_hilbert_band(ref_signal, fs):
+    """Choose the Bayes-compatible Hilbert band around a reference's peak."""
+    T0 = estimate_dominant_period(ref_signal, fs)
+    low = 0.5 / T0
+    # The Bayes seed uses 2 / T0 as its upper edge.  Cap it just below
+    # Nyquist so automatic PCA remains valid when the peak is comparatively
+    # high-frequency.
+    high = min(2.0 / T0, np.nextafter(float(fs) / 2.0, 0.0))
+    if low >= high:
+        raise ValueError(
+            "Cannot construct a valid Hilbert band around the estimated "
+            "dominant frequency. Provide ref_signal and f_range explicitly."
+        )
+    return (low, high)
 
 
 def hilbert_phase(ref_signal, fs, f_range):
@@ -211,12 +271,15 @@ def fit_pca_phase_coordinates(
         ``ref_signal``, ``sampling_rate_hz``, and ``f_range`` are not needed.
     ref_signal : array-like, optional
         Scalar signal used to estimate Hilbert phase (e.g. one joint angle
-        or one marker coordinate). Required when ``phase`` is not supplied.
+        or one marker coordinate). If omitted along with ``phase``, the
+        dominant principal-component score of ``X`` is used automatically.
     sampling_rate_hz : float, optional
-        Sampling rate in Hz. Required when ``ref_signal`` is used.
+        Sampling rate in Hz. Required when phase is not supplied.
     f_range : tuple of float, optional
         Bandpass range for Hilbert-phase estimation, e.g. ``(0.5, 3.0)``.
-        Required when ``ref_signal`` is used.
+        Required when ``ref_signal`` is supplied. If the reference is chosen
+        automatically, defaults to ``(0.5 * f0, 2 * f0)`` around its
+        periodogram peak ``f0`` (capped below Nyquist).
     columns : list of str, optional
         Subset of columns to use when ``X`` is a :class:`pandas.DataFrame`.
         If ``None``, all columns are used.
@@ -254,9 +317,21 @@ def fit_pca_phase_coordinates(
     # ---- get phase ----
     phase_source = "provided"
     if phase is None:
-        if ref_signal is None or sampling_rate_hz is None or f_range is None:
+        if sampling_rate_hz is None:
             raise ValueError(
-                "Provide either phase directly, or provide ref_signal, sampling_rate_hz, and f_range."
+                "Provide either phase directly, or provide sampling_rate_hz "
+                "with ref_signal and f_range."
+            )
+
+        if ref_signal is None:
+            ref_signal = dominant_reference_signal(X_arr)
+            if f_range is None:
+                f_range = _automatic_hilbert_band(ref_signal, sampling_rate_hz)
+            phase_source = "dominant_reference_hilbert"
+        elif f_range is None:
+            raise ValueError(
+                "f_range is required when ref_signal is supplied. Omit both "
+                "ref_signal and f_range to use the automatic dominant reference."
             )
 
         phase, phase_wrapped, amp_hilbert = hilbert_phase(
@@ -264,7 +339,8 @@ def fit_pca_phase_coordinates(
             fs=sampling_rate_hz,
             f_range=f_range,
         )
-        phase_source = "hilbert"
+        if phase_source != "dominant_reference_hilbert":
+            phase_source = "hilbert"
     else:
         phase = np.asarray(phase, dtype=float)
         if phase.ndim != 1:
@@ -463,6 +539,7 @@ def fit_pca_phase_coordinates(
         "algorithm": "pca",
         "models": models,
         "phase_source": phase_source,
+        "ref_signal": ref_signal if phase is not None and phase_source != "provided" else None,
         "input_columns": columns_used,
         "amp_hilbert": amp_hilbert,
         "warnings": [],

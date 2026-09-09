@@ -9,6 +9,8 @@ import pandas as pd
 import pytest
 
 from phase_coordinates import (
+    dominant_reference_signal,
+    estimate_dominant_period,
     hilbert_phase,
     fit_pca_phase_coordinates,
     reconstruct_phase_coordinates,
@@ -376,6 +378,23 @@ class TestFitPcaPhaseCoordinates:
         )
         assert len(samples) == len(X)
         assert len(cycles) >= 4  # should detect most cycles
+
+    def test_uses_dominant_reference_when_phase_and_reference_are_omitted(self):
+        X, _, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100, noise_std=0.01)
+
+        samples, cycles, details = fit_pca_phase_coordinates(
+            X, sampling_rate_hz=fs
+        )
+
+        ref = dominant_reference_signal(X)
+        T0 = estimate_dominant_period(ref, fs)
+        expected_phase, _, _ = hilbert_phase(
+            ref, fs=fs, f_range=(0.5 / T0, 2.0 / T0)
+        )
+        np.testing.assert_allclose(samples["phase"].to_numpy(), expected_phase)
+        assert len(cycles) >= 4
+        assert details["phase_source"] == "dominant_reference_hilbert"
+        np.testing.assert_allclose(details["ref_signal"], ref)
 
     # -- error conditions --
 

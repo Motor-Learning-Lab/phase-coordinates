@@ -27,9 +27,9 @@ from typing import Any
 
 import numpy as np
 from scipy.interpolate import CubicSpline
-from scipy.signal import find_peaks, periodogram
+from scipy.signal import find_peaks
 
-from .core import hilbert_phase
+from .core import dominant_reference_signal, estimate_dominant_period, hilbert_phase
 
 _BAYES_INSTALL_HINT = (
     "fit_bayesian_phase_coordinates() requires the optional 'pymc' and "
@@ -99,30 +99,6 @@ def robust_movement_scale(X):
 # ---------------------------------------------------------------------------
 # Deterministic seeds (spec: "Frequency and duration", "Boundary times")
 # ---------------------------------------------------------------------------
-
-def dominant_reference_signal(X):
-    """Top principal-component score series of mean-centered ``X``."""
-    X = np.asarray(X, dtype=float)
-    Xc = X - X.mean(axis=0)
-    _, _, vt = np.linalg.svd(Xc, full_matrices=False)
-    return Xc @ vt[0]
-
-
-def estimate_dominant_period(ref_signal, fs):
-    """Estimate the dominant period ``T0`` of a scalar signal via periodogram."""
-    ref_signal = np.asarray(ref_signal, dtype=float)
-    freqs, power = periodogram(ref_signal, fs=fs)
-    valid = freqs > 0
-    if not np.any(valid):
-        raise ValueError(
-            "Cannot estimate a dominant frequency: signal is too short or "
-            "has no positive-frequency content."
-        )
-    f0 = float(freqs[valid][np.argmax(power[valid])])
-    if f0 <= 0:
-        raise ValueError("Estimated dominant frequency is non-positive.")
-    return 1.0 / f0
-
 
 def seed_boundary_indices(ref_signal, fs, T0):
     """
