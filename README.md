@@ -18,6 +18,28 @@ For the Bayesian algorithm:
 pip install -e ".[bayes]"
 ```
 
+### Pixi
+
+The checked-in Pixi lockfile supports 64-bit Windows and Linux. Install the
+standard environment with:
+
+```bash
+pixi install
+```
+
+Run the regular test suite in the development environment with:
+
+```bash
+pixi run test
+```
+
+To include the optional Bayesian dependencies and smoke test, use:
+
+```bash
+pixi install --environment bayes-dev
+pixi run test-bayes
+```
+
 ## Quick start
 
 ### PCA algorithm

@@ -39,7 +39,7 @@ markers = [
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "win-64"]
 
 [tool.pixi.pypi-dependencies]
 phase-coordinates = { path = ".", editable = true }
@@ -47,9 +47,16 @@ phase-coordinates = { path = ".", editable = true }
 [tool.pixi.environments]
 default = { solve-group = "default" }
 bayes = { features = ["bayes"], solve-group = "default" }
-dev = { features = ["dev"], solve-group = "default" }
+dev = { features = ["dev", "test"], solve-group = "default" }
+bayes-dev = { features = ["bayes", "dev", "test-bayes"], solve-group = "default" }
 
-[tool.pixi.tasks]
+[tool.pixi.feature.test.tasks]
+test = "python -m pytest"
+
+[tool.pixi.feature.test-bayes.tasks]
+test-bayes = "python -m pytest"
 
 [tool.pixi.dependencies]
 matplotlib = ">=3.11.1,<4"
+# Keep NumPy/SciPy on one OpenMP runtime when combined with PyMC/Numba.
+libblas = { version = ">=3.9,<4", build = "*openblas" }
