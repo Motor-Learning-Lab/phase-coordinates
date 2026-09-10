@@ -27,3 +27,6 @@ env/
 # Local editor settings and personal working notes
 .vscode/
 test_data/things_to_do.md
+# pixi environments
+.pixi/*
+!.pixi/config.toml
