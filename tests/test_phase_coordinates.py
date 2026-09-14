@@ -9,12 +9,15 @@ import pandas as pd
 import pytest
 
 from phase_coordinates import (
+    dominant_reference_signal,
+    estimate_dominant_period,
     hilbert_phase,
     fit_pca_phase_coordinates,
     reconstruct_phase_coordinates,
     SAMPLE_COLUMNS,
     CYCLE_COLUMNS,
 )
+from phase_coordinates.bayesian import seed_boundary_indices
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +379,52 @@ class TestFitPcaPhaseCoordinates:
         )
         assert len(samples) == len(X)
         assert len(cycles) >= 4  # should detect most cycles
+
+    def test_automatic_reference_is_y_oriented_and_peak_anchored(self):
+        fs = 100.0
+        t = np.arange(600) / fs
+        oscillation = np.cos(2 * np.pi * t)
+        X = np.column_stack([
+            -2.0 * oscillation,
+            5.0 * oscillation,
+            0.1 * np.sin(2 * np.pi * t),
+        ])
+
+        reference = dominant_reference_signal(X)
+        assert np.dot(reference, X[:, 1]) > 0
+        assert estimate_dominant_period(reference, fs) == pytest.approx(1.0)
+
+        samples, cycles, details = fit_pca_phase_coordinates(
+            X, sampling_rate_hz=fs
+        )
+
+        peak_index = details["phase_zero"]["sample_index"]
+        assert details["phase_source"] == "dominant_reference_hilbert"
+        assert details["phase_zero"]["method"] == "first_positive_bandpassed_peak"
+        np.testing.assert_allclose(details["ref_signal"], reference)
+        assert samples["phase"].iloc[peak_index] == pytest.approx(0.0)
+        assert samples["phase_in_cycle"].iloc[peak_index] == pytest.approx(0.0)
+        assert samples["cycle"].iloc[peak_index] == 0
+        assert len(cycles) >= 4
+
+    def test_bayesian_seeds_use_the_same_positive_peak_convention(self):
+        fs = 100.0
+        t = np.arange(800) / fs
+        oscillation = np.cos(2 * np.pi * t)
+        X = np.column_stack([
+            -2.0 * oscillation,
+            5.0 * oscillation,
+            0.1 * np.sin(2 * np.pi * t),
+        ])
+
+        reference = dominant_reference_signal(X)
+        T0 = estimate_dominant_period(reference, fs)
+        peaks = seed_boundary_indices(reference, fs, T0)
+
+        assert len(peaks) >= 6
+        # Filter endpoint transients can perturb the final partial cycle.
+        np.testing.assert_allclose(np.diff(peaks[:6]), fs, atol=2)
+        assert np.all(reference[peaks[:6]] > 0)
 
     # -- error conditions --
 

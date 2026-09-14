@@ -49,7 +49,9 @@ import numpy as np
 from phase_coordinates import fit_pca_phase_coordinates, reconstruct_phase_coordinates
 
 # X: (n_time, 3+) array of movement data
-# phase: unwrapped phase in radians (or use ref_signal + sampling_rate_hz + f_range)
+# phase: unwrapped phase in radians (or use ref_signal + sampling_rate_hz + f_range;
+# if both phase and ref_signal are omitted, PCA derives its Y-oriented
+# dominant-PC reference and anchors Phase 0 at its positive filtered peak)
 samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
 X_hat = reconstruct_phase_coordinates(samples, cycles)
 ```
@@ -140,7 +142,9 @@ samples, cycles, details = fit_pca_phase_coordinates(
 **details dict:**
 - `algorithm`: `"pca"`
 - `models`: per-cycle dict with `pca`, `center`, `components`, `explained_variance_ratio`, `indices`
-- `phase_source`: `"provided"` or `"hilbert"`
+- `phase_source`: `"provided"`, `"hilbert"`, or `"dominant_reference_hilbert"`
+- `phase_zero`: automatic-reference anchoring metadata, or `None` for a
+  supplied phase/reference
 - `amp_hilbert`: Hilbert amplitude array (NaN if phase was supplied directly)
 - `warnings`: list of any collected warnings
 
