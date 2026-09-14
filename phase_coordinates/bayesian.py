@@ -27,9 +27,15 @@ from typing import Any
 
 import numpy as np
 from scipy.interpolate import CubicSpline
-from scipy.signal import find_peaks, periodogram
+from scipy.signal import find_peaks
 
-from .core import hilbert_phase
+from .core import (
+    _automatic_hilbert_band,
+    _bandpass_reference_signal,
+    dominant_reference_signal,
+    estimate_dominant_period,
+    hilbert_phase,
+)
 
 _BAYES_INSTALL_HINT = (
     "fit_bayesian_phase_coordinates() requires the optional 'pymc' and "
@@ -100,40 +106,19 @@ def robust_movement_scale(X):
 # Deterministic seeds (spec: "Frequency and duration", "Boundary times")
 # ---------------------------------------------------------------------------
 
-def dominant_reference_signal(X):
-    """Top principal-component score series of mean-centered ``X``."""
-    X = np.asarray(X, dtype=float)
-    Xc = X - X.mean(axis=0)
-    _, _, vt = np.linalg.svd(Xc, full_matrices=False)
-    return Xc @ vt[0]
-
-
-def estimate_dominant_period(ref_signal, fs):
-    """Estimate the dominant period ``T0`` of a scalar signal via periodogram."""
-    ref_signal = np.asarray(ref_signal, dtype=float)
-    freqs, power = periodogram(ref_signal, fs=fs)
-    valid = freqs > 0
-    if not np.any(valid):
-        raise ValueError(
-            "Cannot estimate a dominant frequency: signal is too short or "
-            "has no positive-frequency content."
-        )
-    f0 = float(freqs[valid][np.argmax(power[valid])])
-    if f0 <= 0:
-        raise ValueError("Estimated dominant frequency is non-positive.")
-    return 1.0 / f0
-
-
 def seed_boundary_indices(ref_signal, fs, T0):
     """
-    Detect candidate cycle-boundary sample indices as positive peaks of a
-    reference signal, spaced at roughly the dominant period.
+    Detect candidate cycle-boundary indices as peaks of the band-passed,
+    Y-oriented dominant reference, spaced at roughly the dominant period.
 
     Returns integer sample indices ``tau_idx`` (length ``K``), defining
     ``K - 1`` candidate cycles.
     """
     distance = max(1, int(0.6 * T0 * fs))
-    peaks, _ = find_peaks(ref_signal, distance=distance)
+    filtered_ref = _bandpass_reference_signal(
+        ref_signal, fs, _automatic_hilbert_band(ref_signal, fs)
+    )
+    peaks, _ = find_peaks(filtered_ref, distance=distance)
     if len(peaks) < 3:
         raise ValueError(
             "Could not detect at least 3 boundary events (>= 2 complete "

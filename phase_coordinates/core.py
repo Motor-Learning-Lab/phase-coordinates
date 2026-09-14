@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
-from scipy.signal import butter, sosfiltfilt, hilbert
+from scipy.signal import butter, find_peaks, sosfiltfilt, hilbert, periodogram
 
 # Minimum signal length required by sosfiltfilt with a 4th-order Butterworth
 # filter (2 second-order sections → default padlen = 3 * 2 * 2 = 12).
@@ -72,6 +72,123 @@ CYCLE_COLUMNS = [
 ]
 
 
+def dominant_reference_signal(X, *, y_axis=1):
+    """Return a Y-oriented score along the dominant principal component.
+
+    ``X`` is mean-centred before estimating its primary axis of variation.
+    PCA component signs are otherwise arbitrary, so the axis is oriented to
+    have a non-negative component along ``y_axis`` (the Y coordinate by
+    default).  Consequently, a positive peak of the returned score denotes
+    the positive-Y end of the dominant movement.
+    """
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2:
+        raise ValueError(f"X must be 2-D, got shape {X.shape}.")
+    if X.shape[0] < 2 or X.shape[1] < 1:
+        raise ValueError(
+            "X must contain at least two samples and one feature to derive "
+            "a dominant reference signal."
+        )
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X contains non-finite values (NaN or Inf).")
+    if not 0 <= y_axis < X.shape[1]:
+        raise ValueError(
+            f"y_axis must index a feature of X, got {y_axis} for shape {X.shape}."
+        )
+
+    Xc = X - X.mean(axis=0)
+    _, _, vt = np.linalg.svd(Xc, full_matrices=False)
+    axis = vt[0]
+    if axis[y_axis] < 0:
+        axis = -axis
+    return Xc @ axis
+
+
+def estimate_dominant_period(ref_signal, fs):
+    """Estimate a scalar signal's dominant positive-frequency period."""
+    ref_signal = np.asarray(ref_signal, dtype=float)
+    freqs, power = periodogram(ref_signal, fs=fs)
+    valid = freqs > 0
+    if not np.any(valid):
+        raise ValueError(
+            "Cannot estimate a dominant frequency: signal is too short or "
+            "has no positive-frequency content."
+        )
+    f0 = float(freqs[valid][np.argmax(power[valid])])
+    if f0 <= 0:
+        raise ValueError("Estimated dominant frequency is non-positive.")
+    return 1.0 / f0
+
+
+def _automatic_hilbert_band(ref_signal, fs):
+    """Choose a Hilbert band centred on the dominant periodogram peak."""
+    T0 = estimate_dominant_period(ref_signal, fs)
+    low = 0.5 / T0
+    high = min(2.0 / T0, np.nextafter(float(fs) / 2.0, 0.0))
+    if low >= high:
+        raise ValueError(
+            "Cannot construct a valid Hilbert band around the estimated "
+            "dominant frequency. Provide ref_signal and f_range explicitly."
+        )
+    return (low, high)
+
+
+def _bandpass_reference_signal(ref_signal, fs, f_range):
+    """Validate and band-pass a scalar reference signal."""
+    ref_signal = np.asarray(ref_signal, dtype=float)
+    if ref_signal.ndim != 1:
+        raise ValueError(
+            f"ref_signal must be 1-D, got shape {ref_signal.shape}."
+        )
+    if not np.all(np.isfinite(ref_signal)):
+        raise ValueError("ref_signal contains non-finite values (NaN or Inf).")
+    if len(ref_signal) < _HILBERT_MIN_SAMPLES:
+        raise ValueError(
+            f"ref_signal is too short: need at least {_HILBERT_MIN_SAMPLES} "
+            f"samples for the 4th-order bandpass filter, got {len(ref_signal)}."
+        )
+
+    fs = float(fs)
+    if fs <= 0:
+        raise ValueError(f"fs must be positive, got {fs}.")
+
+    f_range = tuple(f_range)
+    if len(f_range) != 2:
+        raise ValueError("f_range must be a length-2 sequence (low, high).")
+    low, high = f_range
+    if not (0 < low < high):
+        raise ValueError(
+            f"f_range must satisfy 0 < low < high, got ({low}, {high})."
+        )
+    if high >= fs / 2:
+        raise ValueError(
+            f"f_range high ({high} Hz) must be less than the Nyquist "
+            f"frequency (fs/2 = {fs / 2} Hz)."
+        )
+
+    sos = butter(N=4, Wn=f_range, btype="bandpass", fs=fs, output="sos")
+    try:
+        return sosfiltfilt(sos, ref_signal)
+    except ValueError as exc:
+        raise ValueError(
+            "ref_signal is too short for scipy.signal.sosfiltfilt with the "
+            "chosen 4th-order bandpass filter. Use a longer signal, use a "
+            "lower-order filter in the future, or provide a precomputed phase."
+        ) from exc
+
+
+def _first_positive_peak_index(ref_signal, fs, f_range):
+    """Return the first interior positive peak of a filtered reference."""
+    filtered = _bandpass_reference_signal(ref_signal, fs, f_range)
+    peaks, _ = find_peaks(filtered)
+    if len(peaks) == 0:
+        raise ValueError(
+            "Could not detect a positive peak in the band-passed dominant "
+            "reference signal. Provide a longer / cleaner recording."
+        )
+    return int(peaks[0])
+
+
 def hilbert_phase(ref_signal, fs, f_range):
     """
     Get unwrapped Hilbert phase from a scalar reference signal.
@@ -110,55 +227,7 @@ def hilbert_phase(ref_signal, fs, f_range):
         region of the signal, indicating that the reference signal or
         frequency band may not define a reliable instantaneous phase.
     """
-    ref_signal = np.asarray(ref_signal, dtype=float)
-
-    # ---- input validation ----
-    if ref_signal.ndim != 1:
-        raise ValueError(
-            f"ref_signal must be 1-D, got shape {ref_signal.shape}."
-        )
-    if not np.all(np.isfinite(ref_signal)):
-        raise ValueError("ref_signal contains non-finite values (NaN or Inf).")
-    if len(ref_signal) < _HILBERT_MIN_SAMPLES:
-        raise ValueError(
-            f"ref_signal is too short: need at least {_HILBERT_MIN_SAMPLES} "
-            f"samples for the 4th-order bandpass filter, got {len(ref_signal)}."
-        )
-
-    fs = float(fs)
-    if fs <= 0:
-        raise ValueError(f"fs must be positive, got {fs}.")
-
-    f_range = tuple(f_range)
-    if len(f_range) != 2:
-        raise ValueError("f_range must be a length-2 sequence (low, high).")
-    low, high = f_range
-    if not (0 < low < high):
-        raise ValueError(
-            f"f_range must satisfy 0 < low < high, got ({low}, {high})."
-        )
-    if high >= fs / 2:
-        raise ValueError(
-            f"f_range high ({high} Hz) must be less than the Nyquist "
-            f"frequency (fs/2 = {fs / 2} Hz)."
-        )
-
-    sos = butter(
-        N=4,
-        Wn=f_range,
-        btype="bandpass",
-        fs=fs,
-        output="sos",
-    )
-
-    try:
-        x_filt = sosfiltfilt(sos, ref_signal)
-    except ValueError as exc:
-        raise ValueError(
-            "ref_signal is too short for scipy.signal.sosfiltfilt with the "
-            "chosen 4th-order bandpass filter. Use a longer signal, use a "
-            "lower-order filter in the future, or provide a precomputed phase."
-        ) from exc
+    x_filt = _bandpass_reference_signal(ref_signal, fs, f_range)
     analytic = hilbert(x_filt)
 
     phase_wrapped = np.angle(analytic)
@@ -211,12 +280,15 @@ def fit_pca_phase_coordinates(
         ``ref_signal``, ``sampling_rate_hz``, and ``f_range`` are not needed.
     ref_signal : array-like, optional
         Scalar signal used to estimate Hilbert phase (e.g. one joint angle
-        or one marker coordinate). Required when ``phase`` is not supplied.
+        or one marker coordinate). If omitted along with ``phase``, the
+        Y-oriented dominant principal-component score of ``X`` is used.
     sampling_rate_hz : float, optional
-        Sampling rate in Hz. Required when ``ref_signal`` is used.
+        Sampling rate in Hz. Required when phase is not supplied.
     f_range : tuple of float, optional
         Bandpass range for Hilbert-phase estimation, e.g. ``(0.5, 3.0)``.
-        Required when ``ref_signal`` is used.
+        Required when ``ref_signal`` is supplied. With the automatic
+        dominant reference, it defaults to ``(0.5 * f0, 2 * f0)`` around
+        the reference's periodogram peak ``f0``.
     columns : list of str, optional
         Subset of columns to use when ``X`` is a :class:`pandas.DataFrame`.
         If ``None``, all columns are used.
@@ -253,10 +325,22 @@ def fit_pca_phase_coordinates(
 
     # ---- get phase ----
     phase_source = "provided"
+    phase_zero = None
     if phase is None:
-        if ref_signal is None or sampling_rate_hz is None or f_range is None:
+        if sampling_rate_hz is None:
             raise ValueError(
-                "Provide either phase directly, or provide ref_signal, sampling_rate_hz, and f_range."
+                "Provide either phase directly, or provide sampling_rate_hz "
+                "with ref_signal and f_range."
+            )
+        if ref_signal is None:
+            ref_signal = dominant_reference_signal(X_arr)
+            if f_range is None:
+                f_range = _automatic_hilbert_band(ref_signal, sampling_rate_hz)
+            phase_source = "dominant_reference_hilbert"
+        elif f_range is None:
+            raise ValueError(
+                "f_range is required when ref_signal is supplied. Omit both "
+                "ref_signal and f_range to use the automatic dominant reference."
             )
 
         phase, phase_wrapped, amp_hilbert = hilbert_phase(
@@ -264,7 +348,18 @@ def fit_pca_phase_coordinates(
             fs=sampling_rate_hz,
             f_range=f_range,
         )
-        phase_source = "hilbert"
+        if phase_source == "dominant_reference_hilbert":
+            peak_index = _first_positive_peak_index(
+                ref_signal, sampling_rate_hz, f_range
+            )
+            phase = phase - phase[peak_index]
+            phase_wrapped = np.angle(np.exp(1j * phase))
+            phase_zero = {
+                "method": "first_positive_bandpassed_peak",
+                "sample_index": peak_index,
+            }
+        else:
+            phase_source = "hilbert"
     else:
         phase = np.asarray(phase, dtype=float)
         if phase.ndim != 1:
@@ -280,7 +375,10 @@ def fit_pca_phase_coordinates(
         raise ValueError("phase/ref_signal must have the same length as X.")
 
     # ---- define cycles from unwrapped phase ----
-    phase0 = phase - phase[0]
+    # An automatic reference is explicitly anchored at its first positive,
+    # band-passed peak. Retain the existing first-sample convention for an
+    # externally supplied or precomputed phase.
+    phase0 = phase if phase_zero is not None else phase - phase[0]
     cycle_id = np.floor(phase0 / (2 * np.pi)).astype(int)
     phase_in_cycle = np.mod(phase0, 2 * np.pi)
 
@@ -463,6 +561,8 @@ def fit_pca_phase_coordinates(
         "algorithm": "pca",
         "models": models,
         "phase_source": phase_source,
+        "ref_signal": ref_signal if phase_source != "provided" else None,
+        "phase_zero": phase_zero,
         "input_columns": columns_used,
         "amp_hilbert": amp_hilbert,
         "warnings": [],
