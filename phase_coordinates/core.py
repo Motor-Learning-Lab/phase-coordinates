@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
-from scipy.signal import butter, find_peaks, sosfiltfilt, hilbert, periodogram
+from scipy.signal import butter, sosfiltfilt, hilbert, periodogram
 
 # Minimum signal length required by sosfiltfilt with a 4th-order Butterworth
 # filter (2 second-order sections → default padlen = 3 * 2 * 2 = 12).
@@ -69,18 +69,22 @@ CYCLE_COLUMNS = [
     "perp_sd",
     "n_samples",
     "fit_ok",
+    "complete",
+    "duration_ratio",
+    "amplitude_ratio",
+    "backward_steps",
 ]
 
+# The automatic dominant frequency must fit at least this many cycles into the
+# record, so that a slow drift cannot be mistaken for the movement.
+_MIN_CYCLES_FOR_DOMINANT_PERIOD = 3.0
 
-def dominant_reference_signal(X, *, y_axis=1):
-    """Return a Y-oriented score along the dominant principal component.
+# Spectra are zero-padded to at least this many points when the dominant
+# frequency is estimated.
+_DOMINANT_PERIOD_MIN_NFFT = 4096
 
-    ``X`` is mean-centred before estimating its primary axis of variation.
-    PCA component signs are otherwise arbitrary, so the axis is oriented to
-    have a non-negative component along ``y_axis`` (the Y coordinate by
-    default).  Consequently, a positive peak of the returned score denotes
-    the positive-Y end of the dominant movement.
-    """
+
+def _validate_reference_data(X):
     X = np.asarray(X, dtype=float)
     if X.ndim != 2:
         raise ValueError(f"X must be 2-D, got shape {X.shape}.")
@@ -91,32 +95,108 @@ def dominant_reference_signal(X, *, y_axis=1):
         )
     if not np.all(np.isfinite(X)):
         raise ValueError("X contains non-finite values (NaN or Inf).")
-    if not 0 <= y_axis < X.shape[1]:
+    return X
+
+
+def dominant_reference_axis(X, *, y_axis=1):
+    """Return the Y-oriented dominant principal axis of one or several records.
+
+    ``X`` is either one ``(n_time, n_features)`` array or a sequence of such
+    arrays, e.g. several separately recorded runs of the same movement.  Each
+    record is mean-centred on its own and the records are then pooled, so a
+    different resting position in each run does not affect the axis.
+
+    PCA component signs are arbitrary, so the axis is oriented to have a
+    non-negative component along ``y_axis`` (the Y coordinate by default).
+
+    Passing the result as ``ref_axis`` to :func:`fit_pca_phase_coordinates`
+    for every run gives all of them the same reference direction, and hence
+    the same phase zero.
+    """
+    if isinstance(X, (list, tuple)) and len(X) and np.ndim(X[0]) == 2:
+        records = [_validate_reference_data(record) for record in X]
+        if len({record.shape[1] for record in records}) != 1:
+            raise ValueError("All records must have the same number of features.")
+    else:
+        records = [_validate_reference_data(X)]
+    n_features = records[0].shape[1]
+    if not 0 <= y_axis < n_features:
         raise ValueError(
-            f"y_axis must index a feature of X, got {y_axis} for shape {X.shape}."
+            f"y_axis must index a feature of X, got {y_axis} for {n_features} features."
         )
 
-    Xc = X - X.mean(axis=0)
-    _, _, vt = np.linalg.svd(Xc, full_matrices=False)
+    pooled = np.vstack([record - record.mean(axis=0) for record in records])
+    _, _, vt = np.linalg.svd(pooled, full_matrices=False)
     axis = vt[0]
     if axis[y_axis] < 0:
         axis = -axis
-    return Xc @ axis
+    return axis
 
 
-def estimate_dominant_period(ref_signal, fs):
-    """Estimate a scalar signal's dominant positive-frequency period."""
+def dominant_reference_signal(X, *, y_axis=1, axis=None):
+    """Return a Y-oriented score along the dominant principal component.
+
+    ``X`` is mean-centred before estimating its primary axis of variation.
+    PCA component signs are otherwise arbitrary, so the axis is oriented to
+    have a non-negative component along ``y_axis`` (the Y coordinate by
+    default).  Consequently, a positive peak of the returned score denotes
+    the positive-Y end of the dominant movement.
+
+    If ``axis`` is given, ``X`` is projected onto that direction instead of
+    its own dominant axis (see :func:`dominant_reference_axis`).
+    """
+    X = _validate_reference_data(X)
+    if axis is None:
+        axis = dominant_reference_axis(X, y_axis=y_axis)
+    else:
+        axis = np.asarray(axis, dtype=float)
+        if axis.shape != (X.shape[1],):
+            raise ValueError(
+                f"axis must have shape ({X.shape[1]},), got {axis.shape}."
+            )
+        norm = np.linalg.norm(axis)
+        if not np.isfinite(norm) or norm == 0:
+            raise ValueError("axis must be a finite, non-zero vector.")
+        axis = axis / norm
+    return (X - X.mean(axis=0)) @ axis
+
+
+def estimate_dominant_period(ref_signal, fs, *, min_cycles=_MIN_CYCLES_FOR_DOMINANT_PERIOD):
+    """Estimate a scalar signal's dominant period.
+
+    The signal is linearly detrended and tapered, and the strongest spectral
+    peak is taken among frequencies that fit at least ``min_cycles`` cycles
+    into the record.  Slower components are treated as drift, not movement.
+    """
     ref_signal = np.asarray(ref_signal, dtype=float)
-    freqs, power = periodogram(ref_signal, fs=fs)
-    valid = freqs > 0
-    if not np.any(valid):
+    n = len(ref_signal)
+    fs = float(fs)
+    if n < 3:
         raise ValueError(
             "Cannot estimate a dominant frequency: signal is too short or "
             "has no positive-frequency content."
         )
-    f0 = float(freqs[valid][np.argmax(power[valid])])
-    if f0 <= 0:
-        raise ValueError("Estimated dominant frequency is non-positive.")
+    t = np.arange(n)
+    detrended = ref_signal - np.polyval(np.polyfit(t, ref_signal, 1), t)
+    # Zero-pad to a whole multiple of the record length, which refines the
+    # frequency grid while keeping the record's own Fourier frequencies on it.
+    nfft = n * int(np.ceil(_DOMINANT_PERIOD_MIN_NFFT / n))
+    freqs, power = periodogram(detrended, fs=fs, window="hann", nfft=nfft)
+
+    candidates = np.flatnonzero((freqs > 0) & (freqs >= min_cycles * fs / n))
+    if len(candidates) == 0 or not np.any(power[candidates] > 0):
+        raise ValueError(
+            "Cannot estimate a dominant frequency: signal is too short or "
+            "has no positive-frequency content."
+        )
+    # Prefer a true spectral peak: at the lower limit the largest value can be
+    # the skirt of a drift component that lies just below it.
+    interior = candidates[(candidates > 0) & (candidates < len(power) - 1)]
+    peaks = interior[
+        (power[interior] >= power[interior - 1]) & (power[interior] >= power[interior + 1])
+    ]
+    pool = peaks if len(peaks) else candidates
+    f0 = float(freqs[pool[np.argmax(power[pool])]])
     return 1.0 / f0
 
 
@@ -175,18 +255,6 @@ def _bandpass_reference_signal(ref_signal, fs, f_range):
             "chosen 4th-order bandpass filter. Use a longer signal, use a "
             "lower-order filter in the future, or provide a precomputed phase."
         ) from exc
-
-
-def _first_positive_peak_index(ref_signal, fs, f_range):
-    """Return the first interior positive peak of a filtered reference."""
-    filtered = _bandpass_reference_signal(ref_signal, fs, f_range)
-    peaks, _ = find_peaks(filtered)
-    if len(peaks) == 0:
-        raise ValueError(
-            "Could not detect a positive peak in the band-passed dominant "
-            "reference signal. Provide a longer / cleaner recording."
-        )
-    return int(peaks[0])
 
 
 def hilbert_phase(ref_signal, fs, f_range):
@@ -257,6 +325,7 @@ def fit_pca_phase_coordinates(
     *,
     phase=None,
     ref_signal=None,
+    ref_axis=None,
     sampling_rate_hz=None,
     f_range=None,
     columns=None,
@@ -270,6 +339,12 @@ def fit_pca_phase_coordinates(
     "phase plane" and the third component captures deviation perpendicular
     to that plane.
 
+    When the phase is estimated here (from ``ref_signal``, ``ref_axis`` or
+    the automatic reference), phase zero is the peak of the band-passed
+    reference, so every cycle starts at a peak.  The pieces of the record
+    before the first peak and after the last one are returned as cycles too,
+    marked ``complete == False``.
+
     Parameters
     ----------
     X : array-like or pandas.DataFrame, shape (n_time, n_features)
@@ -282,13 +357,20 @@ def fit_pca_phase_coordinates(
         Scalar signal used to estimate Hilbert phase (e.g. one joint angle
         or one marker coordinate). If omitted along with ``phase``, the
         Y-oriented dominant principal-component score of ``X`` is used.
+    ref_axis : array-like, shape (n_features,), optional
+        Direction onto which ``X`` is projected to obtain the reference,
+        instead of ``X``'s own dominant axis.  Use
+        :func:`dominant_reference_axis` on several runs of the same movement
+        and pass the result for each run, so that all runs share one phase
+        zero.  Cannot be combined with ``phase`` or ``ref_signal``.
     sampling_rate_hz : float, optional
         Sampling rate in Hz. Required when phase is not supplied.
     f_range : tuple of float, optional
         Bandpass range for Hilbert-phase estimation, e.g. ``(0.5, 3.0)``.
         Required when ``ref_signal`` is supplied. With the automatic
-        dominant reference, it defaults to ``(0.5 * f0, 2 * f0)`` around
-        the reference's periodogram peak ``f0``.
+        dominant reference or ``ref_axis``, it defaults to
+        ``(0.5 * f0, 2 * f0)`` around the reference's dominant frequency
+        ``f0`` (see :func:`estimate_dominant_period`).
     columns : list of str, optional
         Subset of columns to use when ``X`` is a :class:`pandas.DataFrame`.
         If ``None``, all columns are used.
@@ -300,9 +382,23 @@ def fit_pca_phase_coordinates(
     samples : pandas.DataFrame
         One row per time point. Columns = SAMPLE_COLUMNS.
     cycles : pandas.DataFrame
-        One row per fitted cycle. Columns = CYCLE_COLUMNS.
+        One row per fitted cycle. Columns = CYCLE_COLUMNS.  Four of them
+        describe how far the cycle can be trusted:
+
+        ``complete``
+            The cycle has a boundary inside the record at both ends.  The
+            first and last cycles of a record are usually not complete.
+        ``duration_ratio``
+            Duration divided by the median duration of the complete cycles.
+        ``amplitude_ratio``
+            Mean Hilbert amplitude in the cycle divided by the median over
+            the complete cycles (NaN when ``phase`` was supplied).
+        ``backward_steps``
+            Number of samples in the cycle at which the phase decreased.
     details : dict
-        Algorithm-specific information including the per-cycle PCA models.
+        Algorithm-specific information including the per-cycle PCA models,
+        the reference (``ref_signal``, ``ref_axis``) and the band-pass
+        range actually used (``f_range``).
     """
     # ---- input handling ----
     if isinstance(X, pd.DataFrame):
@@ -326,6 +422,12 @@ def fit_pca_phase_coordinates(
     # ---- get phase ----
     phase_source = "provided"
     phase_zero = None
+    ref_axis_used = None
+    if phase is not None and (ref_signal is not None or ref_axis is not None):
+        raise ValueError("Provide phase, ref_signal or ref_axis, not several of them.")
+    if ref_signal is not None and ref_axis is not None:
+        raise ValueError("Provide ref_signal or ref_axis, not both.")
+
     if phase is None:
         if sampling_rate_hz is None:
             raise ValueError(
@@ -333,7 +435,12 @@ def fit_pca_phase_coordinates(
                 "with ref_signal and f_range."
             )
         if ref_signal is None:
-            ref_signal = dominant_reference_signal(X_arr)
+            if ref_axis is None:
+                ref_axis_used = dominant_reference_axis(X_arr)
+            else:
+                ref_axis_used = np.asarray(ref_axis, dtype=float)
+            ref_signal = dominant_reference_signal(X_arr, axis=ref_axis_used)
+            ref_axis_used = ref_axis_used / np.linalg.norm(ref_axis_used)
             if f_range is None:
                 f_range = _automatic_hilbert_band(ref_signal, sampling_rate_hz)
             phase_source = "dominant_reference_hilbert"
@@ -342,24 +449,16 @@ def fit_pca_phase_coordinates(
                 "f_range is required when ref_signal is supplied. Omit both "
                 "ref_signal and f_range to use the automatic dominant reference."
             )
+        else:
+            phase_source = "hilbert"
 
         phase, phase_wrapped, amp_hilbert = hilbert_phase(
             ref_signal=ref_signal,
             fs=sampling_rate_hz,
             f_range=f_range,
         )
-        if phase_source == "dominant_reference_hilbert":
-            peak_index = _first_positive_peak_index(
-                ref_signal, sampling_rate_hz, f_range
-            )
-            phase = phase - phase[peak_index]
-            phase_wrapped = np.angle(np.exp(1j * phase))
-            phase_zero = {
-                "method": "first_positive_bandpassed_peak",
-                "sample_index": peak_index,
-            }
-        else:
-            phase_source = "hilbert"
+        f_range = tuple(float(f) for f in f_range)
+        phase_zero = {"method": "bandpassed_reference_peak"}
     else:
         phase = np.asarray(phase, dtype=float)
         if phase.ndim != 1:
@@ -370,17 +469,30 @@ def fit_pca_phase_coordinates(
             raise ValueError("phase contains non-finite values (NaN or Inf).")
         phase_wrapped = np.angle(np.exp(1j * phase))
         amp_hilbert = np.full(n_time, np.nan)
+        f_range = None
 
     if len(phase) != n_time:
         raise ValueError("phase/ref_signal must have the same length as X.")
 
     # ---- define cycles from unwrapped phase ----
-    # An automatic reference is explicitly anchored at its first positive,
-    # band-passed peak. Retain the existing first-sample convention for an
-    # externally supplied or precomputed phase.
+    # A Hilbert phase is zero at the peak of the band-passed reference, so it
+    # is used as it is: every cycle then starts at a peak.  A phase supplied
+    # by the caller keeps the convention that its first sample is phase zero.
     phase0 = phase if phase_zero is not None else phase - phase[0]
-    cycle_id = np.floor(phase0 / (2 * np.pi)).astype(int)
-    phase_in_cycle = np.mod(phase0, 2 * np.pi)
+    # A phase that briefly runs backwards across a boundary would scatter a
+    # few samples into the neighbouring cycle.  Following the running extreme
+    # keeps every cycle one contiguous block of samples.
+    if phase0[-1] >= phase0[0]:
+        phase_monotone = np.maximum.accumulate(phase0)
+        backward = np.r_[False, np.diff(phase0) < 0]
+    else:
+        phase_monotone = np.minimum.accumulate(phase0)
+        backward = np.r_[False, np.diff(phase0) > 0]
+    cycle_id = np.floor(phase_monotone / (2 * np.pi)).astype(int)
+    phase_in_cycle = np.mod(phase_monotone, 2 * np.pi)
+    # A cycle whose first (last) sample is within one typical phase step of
+    # the boundary starts (ends) there as far as the sampling can tell.
+    phase_step = float(np.median(np.abs(np.diff(phase_monotone)))) if n_time > 1 else 0.0
 
     # ---- allocate outputs ----
     pc1 = np.full(n_time, np.nan)
@@ -393,6 +505,7 @@ def fit_pca_phase_coordinates(
     perp_local = np.full(n_time, np.nan)
 
     models = {}
+    cycle_quality = {}
 
     previous_components = None
 
@@ -453,12 +566,25 @@ def fit_pca_phase_coordinates(
         radius_local[idx_valid] = np.hypot(u, v)
         perp_local[idx_valid] = z
 
+        first, last = int(idx[0]), int(idx[-1])
+        to_start = phase_in_cycle[first]
+        to_end = 2 * np.pi - phase_in_cycle[last]
+        if phase0[-1] < phase0[0]:
+            to_start, to_end = 2 * np.pi - phase_in_cycle[first], phase_in_cycle[last]
+        starts_at_boundary = first > 0 or to_start <= phase_step
+        ends_at_boundary = last < n_time - 1 or to_end <= phase_step
+
         models[int(cyc)] = {
             "pca": pca,
             "center": center,
             "components": components,
             "explained_variance_ratio": pca.explained_variance_ratio_,
             "indices": idx_valid,
+        }
+        cycle_quality[int(cyc)] = {
+            "complete": bool(starts_at_boundary and ends_at_boundary),
+            "amplitude": float(np.mean(amp_hilbert[idx])),
+            "backward_steps": int(backward[idx].sum()),
         }
 
     # ---- build samples DataFrame ----
@@ -549,10 +675,22 @@ def fit_pca_phase_coordinates(
             "perp_sd": float(np.nanstd(p_vals)),
             "n_samples": len(idx_k),
             "fit_ok": True,
+            "complete": cycle_quality[cyc_k]["complete"],
+            "duration_ratio": np.nan,
+            "amplitude_ratio": np.nan,
+            "backward_steps": cycle_quality[cyc_k]["backward_steps"],
+            "_amplitude": cycle_quality[cyc_k]["amplitude"],
+            "_n_span": s_stop - s_start,
         })
 
     if cycle_rows:
-        cycles = pd.DataFrame(cycle_rows, columns=CYCLE_COLUMNS)
+        cycles = pd.DataFrame(cycle_rows)
+        # Ratios are taken against the complete cycles, which are the ones
+        # whose duration and amplitude describe a whole movement cycle.
+        typical = cycles[cycles["complete"]] if cycles["complete"].any() else cycles
+        cycles["duration_ratio"] = cycles["_n_span"] / typical["_n_span"].median()
+        cycles["amplitude_ratio"] = cycles["_amplitude"] / typical["_amplitude"].median()
+        cycles = cycles[CYCLE_COLUMNS]
     else:
         cycles = pd.DataFrame(columns=CYCLE_COLUMNS)
 
@@ -562,6 +700,8 @@ def fit_pca_phase_coordinates(
         "models": models,
         "phase_source": phase_source,
         "ref_signal": ref_signal if phase_source != "provided" else None,
+        "ref_axis": ref_axis_used,
+        "f_range": f_range,
         "phase_zero": phase_zero,
         "input_columns": columns_used,
         "amp_hilbert": amp_hilbert,
