@@ -51,9 +51,29 @@ from phase_coordinates import fit_pca_phase_coordinates, reconstruct_phase_coord
 # X: (n_time, 3+) array of movement data
 # phase: unwrapped phase in radians (or use ref_signal + sampling_rate_hz + f_range;
 # if both phase and ref_signal are omitted, PCA derives its Y-oriented
-# dominant-PC reference and anchors Phase 0 at its positive filtered peak)
+# dominant-PC reference, and every cycle starts at a peak of that reference)
 samples, cycles, details = fit_pca_phase_coordinates(X, phase=phase)
 X_hat = reconstruct_phase_coordinates(samples, cycles)
+```
+
+#### Many separate runs of the same movement
+
+A record rarely starts and stops on a cycle boundary, so its first and last
+cycles are usually partial. They are returned with `complete == False`; drop
+them before comparing cycles.
+
+To give every run the same phase zero, estimate one reference axis from all
+the runs and pass it to each fit:
+
+```python
+from phase_coordinates import dominant_reference_axis
+
+axis = dominant_reference_axis(runs)          # runs: list of (n_time, 3) arrays
+for X in runs:
+    samples, cycles, details = fit_pca_phase_coordinates(
+        X, ref_axis=axis, sampling_rate_hz=fs
+    )
+    cycles = cycles[cycles["complete"]]
 ```
 
 ### Bayesian algorithm
@@ -111,6 +131,16 @@ One row per fitted cycle. Columns:
 | `perp_sd` | Standard deviation of perpendicular deviation |
 | `n_samples` | Number of samples in this cycle |
 | `fit_ok` | True if the cycle was successfully fitted |
+| `complete` | True if the cycle has a boundary inside the record at both ends |
+| `duration_ratio` | Duration divided by the median duration of the complete cycles |
+| `amplitude_ratio` | Mean Hilbert amplitude divided by the median over the complete cycles (NaN if no Hilbert amplitude is available) |
+| `backward_steps` | Number of samples in the cycle at which the phase decreased |
+
+The last four columns say how far a cycle can be trusted. A reasonable screen
+for irregular cycles is `duration_ratio` outside 0.6 to 1.5, `amplitude_ratio`
+below 0.5, or `backward_steps > 0`. The Bayesian algorithm returns
+`complete == True`, `amplitude_ratio == NaN` and `backward_steps == 0` for
+every cycle.
 
 ### Reconstruction helper
 
@@ -130,6 +160,7 @@ samples, cycles, details = fit_pca_phase_coordinates(
     *,
     phase=None,          # pre-computed unwrapped phase
     ref_signal=None,     # scalar reference for Hilbert phase estimation
+    ref_axis=None,       # direction to project X onto for the reference
     sampling_rate_hz=None,
     f_range=None,        # bandpass (low, high) in Hz for Hilbert estimation
     columns=None,        # subset of DataFrame columns to use
@@ -143,8 +174,12 @@ samples, cycles, details = fit_pca_phase_coordinates(
 - `algorithm`: `"pca"`
 - `models`: per-cycle dict with `pca`, `center`, `components`, `explained_variance_ratio`, `indices`
 - `phase_source`: `"provided"`, `"hilbert"`, or `"dominant_reference_hilbert"`
-- `phase_zero`: automatic-reference anchoring metadata, or `None` for a
-  supplied phase/reference
+- `phase_zero`: `{"method": "bandpassed_reference_peak"}` when the phase is
+  estimated here, so that every cycle starts at a peak of the band-passed
+  reference; `None` for a supplied phase, whose first sample is phase zero
+- `ref_signal`, `ref_axis`: the reference used and the axis it was projected
+  onto (`None` where not applicable)
+- `f_range`: the band-pass range used (`None` for a supplied phase)
 - `amp_hilbert`: Hilbert amplitude array (NaN if phase was supplied directly)
 - `warnings`: list of any collected warnings
 
@@ -206,6 +241,9 @@ samples, cycles, details = fit_bayesian_phase_coordinates(
 ## API reference
 
 - `hilbert_phase(ref_signal, fs, f_range)` → `(phase_unwrapped, phase_wrapped, amplitude)`
+- `dominant_reference_axis(X)` → unit vector; `X` is one record or a list of records
+- `dominant_reference_signal(X, *, axis=None)` → score of `X` along its dominant axis, or along `axis`
+- `estimate_dominant_period(ref_signal, fs, *, min_cycles=3)` → period in seconds
 - `fit_pca_phase_coordinates(X, ...)` → `(samples, cycles, details)`
 - `fit_bayesian_phase_coordinates(X, *, sampling_rate_hz, ...)` → `(samples, cycles, details)`
 - `reconstruct_phase_coordinates(samples, cycles)` → `np.ndarray (n_time, 3)`

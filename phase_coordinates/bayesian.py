@@ -1232,9 +1232,16 @@ def fit_bayesian_phase_coordinates(
             "perp_sd": perp_sd_k,
             "n_samples": n_samples_k,
             "fit_ok": True,
+            # Every Bayesian cycle lies between two estimated boundaries.
+            "complete": True,
+            "duration_ratio": np.nan,
+            "amplitude_ratio": np.nan,
+            "backward_steps": 0,
         })
 
     cycles = pd.DataFrame(cycle_rows, columns=CYCLE_COLUMNS)
+    if len(cycles):
+        cycles["duration_ratio"] = cycles["duration"] / cycles["duration"].median()
 
     # ---- Build details dict ----
     details = {

@@ -17,6 +17,9 @@ hilbert_phase
     Hilbert transform.
 dominant_reference_signal
     Derive the shared Y-oriented dominant principal-component reference.
+dominant_reference_axis
+    Dominant axis of one record or of several runs pooled, for use as a
+    reference direction shared between runs.
 fit_pca_phase_coordinates
     Cycle-by-cycle PCA phase coordinates (fast; phase supplied or Hilbert).
 fit_bayesian_phase_coordinates
@@ -31,6 +34,7 @@ CYCLE_COLUMNS
 """
 
 from .core import (
+    dominant_reference_axis,
     dominant_reference_signal,
     estimate_dominant_period,
     hilbert_phase,
@@ -43,6 +47,7 @@ from .core import (
 from .bayesian import fit_bayesian_phase_coordinates
 
 __all__ = [
+    "dominant_reference_axis",
     "dominant_reference_signal",
     "estimate_dominant_period",
     "hilbert_phase",

@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from phase_coordinates import (
+    dominant_reference_axis,
     dominant_reference_signal,
     estimate_dominant_period,
     hilbert_phase,
@@ -398,14 +399,164 @@ class TestFitPcaPhaseCoordinates:
             X, sampling_rate_hz=fs
         )
 
-        peak_index = details["phase_zero"]["sample_index"]
         assert details["phase_source"] == "dominant_reference_hilbert"
-        assert details["phase_zero"]["method"] == "first_positive_bandpassed_peak"
+        assert details["phase_zero"] == {"method": "bandpassed_reference_peak"}
+        assert details["f_range"] == pytest.approx((0.5, 2.0))
         np.testing.assert_allclose(details["ref_signal"], reference)
-        assert samples["phase"].iloc[peak_index] == pytest.approx(0.0)
-        assert samples["phase_in_cycle"].iloc[peak_index] == pytest.approx(0.0)
-        assert samples["cycle"].iloc[peak_index] == 0
-        assert len(cycles) >= 4
+        np.testing.assert_allclose(np.abs(details["ref_axis"] @ [-2.0, 5.0, 0.0]), np.hypot(2, 5), rtol=1e-3)
+        # Peaks of the reference are at whole seconds; away from the record
+        # edges every cycle must start within a few samples of one.
+        inner = cycles.iloc[1:-1]
+        assert len(inner) >= 3
+        from_peak = (inner["sample_start"].to_numpy() + 50) % 100 - 50
+        np.testing.assert_allclose(from_peak, 0, atol=3)
+        assert (samples["phase_in_cycle"].iloc[inner["sample_start"]] < 0.1).all()
+
+    # -- phase zero, partial cycles and cycle quality --
+
+    @staticmethod
+    def _oscillation(t, drift=0.0):
+        """Elongated loop along +Y with period 1 s, plus an optional slow drift in Y."""
+        y = np.cos(2 * np.pi * t) + drift * t
+        return np.column_stack([
+            0.2 * np.sin(2 * np.pi * t), y, 0.05 * np.cos(4 * np.pi * t),
+        ])
+
+    def test_cycles_start_at_peaks_when_record_starts_mid_cycle(self):
+        fs = 100.0
+        # Start 0.37 s into a cycle and stop 0.2 s past a peak.
+        t = 0.37 + np.arange(783) / fs
+        samples, cycles, details = fit_pca_phase_coordinates(
+            self._oscillation(t), sampling_rate_hz=fs
+        )
+        assert not cycles["complete"].iloc[0]
+        assert not cycles["complete"].iloc[-1]
+        assert cycles["complete"].iloc[1:-1].all()
+        complete = cycles[cycles["complete"]]
+        peak_times = t[complete["sample_start"].to_numpy()]
+        np.testing.assert_allclose(peak_times, np.round(peak_times), atol=0.02)
+        np.testing.assert_allclose(complete["duration_ratio"], 1.0, atol=0.03)
+        assert (cycles.loc[~cycles["complete"], "duration_ratio"] < 0.8).all()
+
+    def test_explicit_reference_is_peak_anchored_too(self):
+        fs = 100.0
+        t = 0.37 + np.arange(783) / fs
+        X = self._oscillation(t)
+        _, cycles, details = fit_pca_phase_coordinates(
+            X, ref_signal=X[:, 1], sampling_rate_hz=fs, f_range=(0.5, 2.0)
+        )
+        assert details["phase_zero"] == {"method": "bandpassed_reference_peak"}
+        complete = cycles[cycles["complete"]]
+        peak_times = t[complete["sample_start"].to_numpy()]
+        np.testing.assert_allclose(peak_times, np.round(peak_times), atol=0.02)
+
+    def test_small_bump_before_first_peak_does_not_shift_the_run(self):
+        fs = 100.0
+        t = 0.55 + np.arange(900) / fs
+        X = self._oscillation(t)
+        # A small local maximum inside the first trough.  It used to be taken
+        # as the anchor for phase zero of the whole record.
+        X[:, 1] += 0.15 * np.exp(-0.5 * ((t - 0.62) / 0.03) ** 2)
+        _, cycles, _ = fit_pca_phase_coordinates(X, sampling_rate_hz=fs)
+        complete = cycles[cycles["complete"]].iloc[1:]
+        peak_times = t[complete["sample_start"].to_numpy()]
+        np.testing.assert_allclose(peak_times, np.round(peak_times), atol=0.03)
+
+    def test_slow_drift_is_not_taken_for_the_movement(self):
+        fs = 100.0
+        t = np.arange(1000) / fs
+        # Over the record the drift spans 8 units; the movement spans 2.
+        X = self._oscillation(t, drift=0.8)
+        reference = dominant_reference_signal(X)
+        assert estimate_dominant_period(reference, fs) == pytest.approx(1.0, rel=0.05)
+        _, cycles, _ = fit_pca_phase_coordinates(X, sampling_rate_hz=fs)
+        assert cycles["complete"].sum() >= 8
+
+    def test_dominant_period_ignores_components_slower_than_min_cycles(self):
+        fs = 100.0
+        t = np.arange(1000) / fs
+        signal = np.cos(2 * np.pi * t) + 5.0 * np.sin(2 * np.pi * 0.15 * t)
+        assert estimate_dominant_period(signal, fs) == pytest.approx(1.0, rel=0.05)
+        assert estimate_dominant_period(signal, fs, min_cycles=1.0) > 3.0
+
+    def test_dominant_period_raises_when_record_is_too_short(self):
+        with pytest.raises(ValueError, match="dominant frequency"):
+            estimate_dominant_period(np.array([0.0, 1.0]), 100.0)
+
+    def test_cycles_are_contiguous_when_phase_steps_back(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        phase = phase_true.copy()
+        # Just after the second boundary the phase dips back below it.
+        phase[203:206] -= 0.4
+        samples, cycles, _ = fit_pca_phase_coordinates(X, phase=phase)
+        assert ((cycles["sample_stop"] - cycles["sample_start"]) == cycles["n_samples"]).all()
+        assert (np.diff(samples["cycle"]) >= 0).all()
+        assert cycles["backward_steps"].sum() == 1
+        assert cycles.loc[cycles["cycle"] == 2, "backward_steps"].item() == 1
+
+    def test_supplied_phase_from_zero_gives_complete_cycles(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        _, cycles, details = fit_pca_phase_coordinates(X, phase=phase_true)
+        assert len(cycles) == 5
+        assert cycles["complete"].all()
+        assert cycles["amplitude_ratio"].isna().all()
+        np.testing.assert_allclose(cycles["duration_ratio"], 1.0)
+        assert details["phase_zero"] is None
+        assert details["f_range"] is None
+
+    def test_decreasing_supplied_phase_is_segmented(self):
+        X, phase_true, _ = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        samples, cycles, _ = fit_pca_phase_coordinates(X, phase=-phase_true)
+        assert len(cycles) >= 5
+        assert ((cycles["sample_stop"] - cycles["sample_start"]) == cycles["n_samples"]).all()
+        assert (np.diff(samples["cycle"]) <= 0).all()
+
+    # -- shared reference axis --
+
+    def test_dominant_reference_axis_pools_records(self):
+        fs = 100.0
+        t = np.arange(600) / fs
+        runs = [self._oscillation(t) + offset for offset in ([0, 0, 0], [5, -3, 2])]
+        axis = dominant_reference_axis(runs)
+        np.testing.assert_allclose(axis, dominant_reference_axis(runs[0]), atol=1e-8)
+        assert axis[1] > 0
+        np.testing.assert_allclose(np.linalg.norm(axis), 1.0)
+        np.testing.assert_allclose(
+            dominant_reference_signal(runs[1], axis=axis),
+            dominant_reference_signal(runs[1]),
+            atol=1e-8,
+        )
+
+    def test_ref_axis_gives_runs_a_common_phase_zero(self):
+        fs = 100.0
+        t = 0.3 + np.arange(700) / fs
+        X = self._oscillation(t)
+        # Along -Y the reference is inverted, so its peaks are half a cycle away.
+        _, cycles, details = fit_pca_phase_coordinates(
+            X, ref_axis=[0.0, -2.0, 0.0], sampling_rate_hz=fs
+        )
+        np.testing.assert_allclose(details["ref_axis"], [0.0, -1.0, 0.0])
+        assert details["phase_source"] == "dominant_reference_hilbert"
+        complete = cycles[cycles["complete"]]
+        start_times = t[complete["sample_start"].to_numpy()]
+        np.testing.assert_allclose(start_times % 1.0, 0.5, atol=0.02)
+
+    def test_ref_axis_cannot_be_combined_with_phase_or_ref_signal(self):
+        X, phase_true, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        with pytest.raises(ValueError, match="ref_axis"):
+            fit_pca_phase_coordinates(X, phase=phase_true, ref_axis=[0, 1, 0])
+        with pytest.raises(ValueError, match="ref_axis"):
+            fit_pca_phase_coordinates(
+                X, ref_signal=X[:, 0], ref_axis=[0, 1, 0],
+                sampling_rate_hz=fs, f_range=(0.5, 2.0),
+            )
+
+    def test_ref_axis_must_match_features(self):
+        X, _, fs = _make_cyclic_3d(n_cycles=5, samples_per_cycle=100)
+        with pytest.raises(ValueError, match="axis must have shape"):
+            fit_pca_phase_coordinates(X, ref_axis=[0, 1], sampling_rate_hz=fs)
+        with pytest.raises(ValueError, match="non-zero"):
+            fit_pca_phase_coordinates(X, ref_axis=[0, 0, 0], sampling_rate_hz=fs)
 
     def test_bayesian_seeds_use_the_same_positive_peak_convention(self):
         fs = 100.0
