@@ -6,14 +6,14 @@ Three things live here:
 1. Loading: movement runs for the subjects attached to the issue, built with
    the same rules as Noam's ``labeled_analysis.py`` (positive windows unioned
    per source file, gaps <= 15 frames bridged, runs >= 3 s kept).
-2. ``segment_cycles``: a prototype of the proposed segmentation.  Each of the
-   three changes is a separate switch, so with every switch at its "current"
-   setting it reproduces ``fit_pca_phase_coordinates`` exactly (checked in the
-   notebook) and the changes can be turned on one at a time.
+2. ``segment_cycles``: a stand-alone segmentation in which each change made
+   for the issue is a separate switch, so the changes can be turned on one at
+   a time.  With every switch off it is the package as it was at ``d83b30d``
+   (it reproduced that version exactly, cycle for cycle, before the package
+   was changed).  With every switch on it must equal the package as it is
+   now; the notebook checks that.
 3. Metrics that do not depend on any phase model, so the variants can be
    compared fairly.
-
-Nothing in ``phase_coordinates/`` is modified by this workup.
 """
 
 from __future__ import annotations
@@ -25,7 +25,12 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks, periodogram
 
-from phase_coordinates import fit_pca_phase_coordinates, hilbert_phase
+from phase_coordinates import (
+    dominant_reference_axis,
+    estimate_dominant_period,
+    fit_pca_phase_coordinates,
+    hilbert_phase,
+)
 from phase_coordinates.core import _bandpass_reference_signal
 
 HERE = Path(__file__).resolve().parent
@@ -128,16 +133,11 @@ def run_key(run, hand):
 
 def dominant_axis(X_list):
     """Y-oriented dominant axis of one array or of several pooled, per-array-centred arrays."""
-    if isinstance(X_list, np.ndarray):
-        X_list = [X_list]
-    pooled = np.vstack([X - X.mean(axis=0) for X in X_list])
-    _, _, vt = np.linalg.svd(pooled, full_matrices=False)
-    axis = vt[0]
-    return -axis if axis[1] < 0 else axis
+    return dominant_reference_axis(X_list)
 
 
 def periodogram_frequency(ref, fs=FS_HZ):
-    """The package's current rule: largest periodogram bin at any positive frequency."""
+    """The package's rule before the fix: largest periodogram bin at any positive frequency."""
     freqs, power = periodogram(ref, fs=fs)
     valid = freqs > 0
     return float(freqs[valid][np.argmax(power[valid])])
@@ -150,18 +150,19 @@ def _detrended_spectrum(ref, fs, nfft):
     return periodogram(ref, fs=fs, window="hann", nfft=max(nfft, len(ref)))
 
 
-def robust_frequency(refs, fs=FS_HZ, min_cycles=3.0, f_max=5.0, nfft=4096):
-    """
-    Proposed rule for the dominant frequency.
+def robust_frequency(ref, fs=FS_HZ):
+    """The package's rule after the fix (``estimate_dominant_period``)."""
+    return 1.0 / estimate_dominant_period(ref, fs)
 
-    Differences from ``periodogram_frequency``: each record is linearly
-    detrended and tapered, the spectrum is zero-padded, and only frequencies
-    that fit at least ``min_cycles`` cycles into the record (and lie below
-    ``f_max``) are candidates.  Several records can be passed; their spectra
-    are then summed weighted by length, giving one shared estimate.
+
+def pooled_frequency(refs, fs=FS_HZ, min_cycles=3.0, f_max=5.0, nfft=4096):
     """
-    if isinstance(refs, np.ndarray):
-        refs = [refs]
+    One dominant frequency for several records of the same movement.
+
+    The detrended, tapered spectra are summed weighted by record length, and
+    the largest value is taken among frequencies that fit at least
+    ``min_cycles`` cycles into every record and lie below ``f_max``.
+    """
     total = None
     f_low = 0.0
     for ref in refs:
@@ -170,7 +171,7 @@ def robust_frequency(refs, fs=FS_HZ, min_cycles=3.0, f_max=5.0, nfft=4096):
         f_low = max(f_low, min_cycles * fs / len(ref))
     candidates = (freqs >= f_low) & (freqs <= f_max)
     if not candidates.any():
-        raise ValueError("Record too short for the requested min_cycles / f_max.")
+        raise ValueError("Records too short for the requested min_cycles / f_max.")
     return float(freqs[candidates][np.argmax(total[candidates])])
 
 
@@ -182,7 +183,7 @@ def shared_reference(X_list, fs=FS_HZ):
     # length instead so that one short run does not raise it for everyone.
     median_len = int(np.median([len(r) for r in refs]))
     usable = [r for r in refs if len(r) >= median_len] or refs
-    return axis, robust_frequency(usable, fs)
+    return axis, pooled_frequency(usable, fs)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +205,7 @@ def segment_cycles(
     Parameters
     ----------
     anchor : {"first_peak", "absolute"}
-        ``"first_peak"`` is the package's current rule: subtract the phase at
+        ``"first_peak"`` is the package's rule before the fix: subtract the phase at
         the first peak of the band-passed reference, so one event fixes phase
         zero for the whole run.  ``"absolute"`` uses the Hilbert phase as it
         is: phase zero is the peak of the band-passed reference in every cycle.
@@ -235,27 +236,40 @@ def segment_cycles(
         phase, _, amplitude = hilbert_phase(ref, fs, band)
     filtered = _bandpass_reference_signal(ref, fs, band)
 
+    n = len(X)
     anchor_error = 0.0
     if anchor == "first_peak":
         peaks, _ = find_peaks(filtered)
         anchor_error = float(np.angle(np.exp(1j * phase[peaks[0]])))
         phase = phase - phase[peaks[0]]
-        cycle_id = np.floor(phase / (2 * np.pi)).astype(int)
+        monotone = phase
+        step = 0.0
     elif anchor == "absolute":
         # A cycle is the stretch between two successive upward crossings of a
         # multiple of 2*pi.  Taking the running maximum first makes every
         # cycle one contiguous block even where the phase briefly runs back.
-        cycle_id = np.floor(np.maximum.accumulate(phase) / (2 * np.pi)).astype(int)
+        monotone = np.maximum.accumulate(phase)
+        # An end cycle counts as complete when its outer sample is within one
+        # typical phase step of the boundary.
+        step = float(np.median(np.abs(np.diff(monotone))))
     else:
         raise ValueError(f"Unknown anchor {anchor!r}.")
+    cycle_id = np.floor(monotone / (2 * np.pi)).astype(int)
+    in_cycle = np.mod(monotone, 2 * np.pi)
+    backward = np.r_[False, np.diff(phase) < 0]
 
-    n = len(X)
     rows = []
     for cyc in np.unique(cycle_id):
         idx = np.flatnonzero(cycle_id == cyc)
         if len(idx) < 10:  # the package's min_samples_per_cycle default
             continue
         start, stop = int(idx.min()), int(idx.max()) + 1
+        if anchor == "absolute":
+            complete = (start > 0 or in_cycle[start] <= step) and (
+                stop < n or 2 * np.pi - in_cycle[stop - 1] <= step
+            )
+        else:
+            complete = start > 0 and stop < n
         rows.append({
             "cycle": int(cyc),
             "sample_start": start,
@@ -263,9 +277,9 @@ def segment_cycles(
             "n_samples": len(idx),
             "duration": (stop - start) / fs,
             "contiguous": len(idx) == stop - start,
-            "complete": start > 0 and stop < n,
+            "complete": bool(complete),
             "amplitude": float(amplitude[idx].mean()),
-            "backward_steps": int((np.diff(phase[start:stop]) < 0).sum()),
+            "backward_steps": int(backward[idx].sum()),
         })
     cycles = pd.DataFrame(rows)
     if len(cycles):
@@ -279,17 +293,19 @@ def segment_cycles(
     }
 
 
-def package_cycles(X, fs=FS_HZ):
-    """Cycles exactly as ``fit_pca_phase_coordinates`` returns them today."""
+def package_cycles(X, fs=FS_HZ, ref_axis=None):
+    """Cycles exactly as the installed ``fit_pca_phase_coordinates`` returns them."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        samples, cycles, details = fit_pca_phase_coordinates(X, sampling_rate_hz=fs)
+        samples, cycles, details = fit_pca_phase_coordinates(
+            X, sampling_rate_hz=fs, ref_axis=ref_axis
+        )
     return samples, cycles, details
 
 
 VARIANTS = {
     # label: (segment_cycles keyword arguments, keep only complete cycles, what the condition's runs share)
-    "A. current package": (dict(anchor="first_peak", frequency="periodogram"), False, ()),
+    "A. before the fix": (dict(anchor="first_peak", frequency="periodogram"), False, ()),
     "B. A + drop partial cycles": (dict(anchor="first_peak", frequency="periodogram"), True, ()),
     "C. B + phase zero at every peak": (dict(anchor="absolute", frequency="periodogram"), True, ()),
     "D. C + robust frequency": (dict(anchor="absolute", frequency="robust"), True, ()),
@@ -450,12 +466,15 @@ def circular_mean(angle):
 
 
 # ---------------------------------------------------------------------------
-# Workaround with the package as it is today (public functions only)
+# Workaround for the package before the fix (public functions only)
 # ---------------------------------------------------------------------------
 
 def fit_with_absolute_phase_zero(X, fs=FS_HZ):
     """
-    Get peak-anchored, complete cycles from the current package.
+    Get peak-anchored, complete cycles from the package as it was before the fix.
+
+    Not needed with the package on this branch, which does this itself; kept
+    for anyone still on ``main`` at ``d83b30d``.
 
     The reference and band are the ones the package would choose by itself.
     The Hilbert phase is computed with the public ``hilbert_phase`` and the

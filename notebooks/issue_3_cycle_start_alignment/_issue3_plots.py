@@ -209,7 +209,7 @@ def partial_cycles_example(fit, table, stem, title):
     ax.set_title(title)
     ax.legend(handles=[
         Line2D([], [], color=NEUTRAL, lw=1.0, label="Reference (score on dominant axis)"),
-        Line2D([], [], color=CURRENT, lw=1.0, label="Cycle start (current package)"),
+        Line2D([], [], color=CURRENT, lw=1.0, label="Cycle start (before the fix)"),
         Patch(color=PARTIAL, alpha=0.35, label="Partial cycle"),
     ], loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3)
 
@@ -226,7 +226,7 @@ def partial_cycles_example(fit, table, stem, title):
 
 
 def anchor_example(fit_current, fit_proposed, stem, title):
-    """Current vs proposed cycle starts on one run whose anchor landed off the peak."""
+    """Cycle starts before and after the fix on one run whose anchor landed off the peak."""
     fig, axes = plt.subplots(2, 1, figsize=(11, 4.6), constrained_layout=True, sharex=True, sharey=True)
     _timeline(axes[0], fit_current, CURRENT, mark_partial=False)
     _timeline(axes[1], fit_proposed, PROPOSED, mark_partial=False)
@@ -240,18 +240,18 @@ def anchor_example(fit_current, fit_proposed, stem, title):
         arrowprops=dict(arrowstyle="-", color=INK, lw=0.8), fontsize=8,
     )
     axes[0].set_title(
-        f"Current: phase zero fixed once, at the anchor "
+        f"Before: phase zero fixed once, at the anchor "
         f"(anchor is {np.degrees(fit_current['anchor_error']):+.0f}° from a true peak)"
     )
-    axes[1].set_title("Proposed: phase zero at the peak of the band-passed reference in every cycle")
+    axes[1].set_title("After: phase zero at the peak of the band-passed reference in every cycle")
     axes[1].set_xlabel("Time in run (s)")
     for ax in axes:
         ax.set_ylabel("Reference")
     fig.legend(handles=[
         Line2D([], [], color=NEUTRAL, lw=1.0, label="Reference (score on dominant axis)"),
         Line2D([], [], color=INK, lw=1.0, label="Band-passed reference"),
-        Line2D([], [], color=CURRENT, lw=1.0, label="Cycle start, current"),
-        Line2D([], [], color=PROPOSED, lw=1.0, label="Cycle start, proposed"),
+        Line2D([], [], color=CURRENT, lw=1.0, label="Cycle start, before"),
+        Line2D([], [], color=PROPOSED, lw=1.0, label="Cycle start, after"),
     ], loc="outside lower center", ncol=4)
     fig.suptitle(title)
     return save(fig, stem)
@@ -292,7 +292,7 @@ def frequency_scatter(freq_table, stem):
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.0), constrained_layout=True, sharex=True, sharey=True)
     for ax, column, label in zip(
         axes, ["f_periodogram", "f_robust"],
-        ["Current rule: largest periodogram bin", "Proposed per-run rule: detrended, ≥ 3 cycles in the run"],
+        ["Before: largest periodogram bin", "After: detrended, ≥ 3 cycles in the run"],
     ):
         for skill in I.SKILLS:
             sub = freq_table[freq_table["skill"].eq(skill)]
@@ -323,11 +323,11 @@ def frequency_example(fit_current, fit_proposed, stem, title):
     _timeline(axes[0], fit_current, CURRENT)
     _timeline(axes[1], fit_proposed, PROPOSED)
     axes[0].set_title(
-        f"Current: dominant frequency {fit_current['f0']:.2f} Hz, "
+        f"Before: dominant frequency {fit_current['f0']:.2f} Hz, "
         f"complete cycles: {int(fit_current['cycles']['complete'].sum())}"
     )
     axes[1].set_title(
-        f"Proposed: dominant frequency {fit_proposed['f0']:.2f} Hz, "
+        f"After: dominant frequency {fit_proposed['f0']:.2f} Hz, "
         f"complete cycles: {int(fit_proposed['cycles']['complete'].sum())}"
     )
     axes[1].set_xlabel("Time in run (s)")
@@ -336,8 +336,8 @@ def frequency_example(fit_current, fit_proposed, stem, title):
     fig.legend(handles=[
         Line2D([], [], color=NEUTRAL, lw=1.0, label="Reference (score on dominant axis)"),
         Line2D([], [], color=INK, lw=1.0, label="Band-passed reference"),
-        Line2D([], [], color=CURRENT, lw=1.0, label="Cycle start, current"),
-        Line2D([], [], color=PROPOSED, lw=1.0, label="Cycle start, proposed"),
+        Line2D([], [], color=CURRENT, lw=1.0, label="Cycle start, before"),
+        Line2D([], [], color=PROPOSED, lw=1.0, label="Cycle start, after"),
         Patch(color=PARTIAL, alpha=0.35, label="Partial cycle"),
     ], loc="outside lower center", ncol=5)
     fig.suptitle(title)
